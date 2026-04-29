@@ -120,6 +120,8 @@ bash extract_motion/CameraHMR/fetch_pretrained_models.sh
 ```
 需要注册 https://camerahmr.is.tue.mpg.de/ 输入用户名
 
+详细权重放置说明见：`WEIGHTS_PLACEMENT_README.md`
+
 
 下载后文件位置：
 - `third_party/extract_motion/CameraHMR/data/models/SMPL/SMPL_NEUTRAL.pkl`
