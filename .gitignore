@@ -1,0 +1,65 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.env
+.ipynb_checkpoints/
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ===== Logs / temp =====
+*.log
+logs/
+tmp/
+temp/
+cache/
+*.tmp
+
+# ===== Large model/checkpoint/weights =====
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.onnx
+*.engine
+*.trt
+*.safetensors
+*.pkl
+*.h5
+*.hdf5
+*.npz
+*.npy
+
+# ===== Media / datasets / outputs (usually huge) =====
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.gif
+*.zip
+*.tar
+*.tar.gz
+*.7z
+*.rar
+
+# ===== Project-specific heavy dirs =====
+examples/
+outputs/
+checkpoints/
+weights/
+datasets/
+data/
+external_smpl_runs/
+third_party/extract_motion/CameraHMR/data/
+
+# ===== Keep repo structure with placeholders if needed =====
+!examples/.gitkeep
+!outputs/.gitkeep
