@@ -66,4 +66,5 @@ data/
 
 third_party/extract_motion/CameraHMR/data/**
 !third_party/extract_motion/CameraHMR/data/
-!third_party/extract_motion/CameraHMR/data/.gitkeep
+!third_party/extract_motion/CameraHMR/data/**/
+!third_party/extract_motion/CameraHMR/data/**/.gitkeep
