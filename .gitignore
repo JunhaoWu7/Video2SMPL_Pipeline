@@ -63,3 +63,7 @@ third_party/extract_motion/CameraHMR/data/
 # ===== Keep repo structure with placeholders if needed =====
 !examples/.gitkeep
 !outputs/.gitkeep
+
+
+third_party/extract_motion/CameraHMR/data/**
+!third_party/extract_motion/CameraHMR/data/.gitkeep
