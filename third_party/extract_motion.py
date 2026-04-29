@@ -35,9 +35,15 @@ if _CAMERAHMR_SCRIPTS not in sys.path:
 
 SMPL_MODEL_PATH = os.path.join(_CAMERAHMR_ROOT, 'data', 'models', 'SMPL', 'SMPL_NEUTRAL.pkl')
 
-from common.constants import JOINT_NUM
-from dataset.utils import load_motion
-from vis_motion.pyrender_checker import motion_vis_during_validation
+from scripts.data_processors.smpl.constants import JOINT_NUM
+
+try:
+    from dataset.utils import load_motion
+    from vis_motion.pyrender_checker import motion_vis_during_validation
+except Exception:
+    # Optional visualization deps are not required by pipeline/run_pipeline.py.
+    load_motion = None
+    motion_vis_during_validation = None
 
 from mesh_estimator_video import HumanMeshEstimator, read_frames
 from bbox_preprocess.tracker import Tracker
@@ -475,7 +481,7 @@ def main():
     parser.add_argument('--person_idx', type=int, default=0, help='Person index for multi-person videos')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite existing output files')
     parser.add_argument('--device', type=str, default=None, help='Device to use (cuda or cpu)')
-    parser.add_argument('--max_frames', type=int, default=300, help='Maximum number of frames to process')
+    parser.add_argument('--max_frames', type=int, default=500, help='Maximum number of frames to process')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for CameraHMR')
     parser.add_argument('--use_shape', action='store_true', help='Include shape parameters (betas) in motion representation')
     parser.add_argument('--visualize', action='store_true', help='Visualize the extracted motion')
@@ -513,6 +519,11 @@ def main():
     )
     
     if args.visualize:
+        if load_motion is None or motion_vis_during_validation is None:
+            raise ModuleNotFoundError(
+                "Visualization modules are missing (dataset.utils / vis_motion.pyrender_checker). "
+                "Please disable --visualize or provide those modules from the original EchoMotion layout."
+            )
         logger.info("Visualizing extracted motion...")
         motion_data = result['motion'].to(device)
         

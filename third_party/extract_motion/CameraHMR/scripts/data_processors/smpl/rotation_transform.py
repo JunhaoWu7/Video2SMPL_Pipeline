@@ -50,9 +50,8 @@ def rot6d_to_axis_angle(rot6d):
     b3 = torch.cross(b1, b2, dim=-1)
     rot_mat = torch.stack((b1, b2, b3), dim=-1)  # 3x3 rotation matrix
 
-    rot_mat = torch.cat([rot_mat, torch.zeros((batch_size, 3, 1), device=rot_mat.device).float()],
-                        2)  # 3x4 rotation matrix
-    axis_angle = tgm.rotation_matrix_to_angle_axis(rot_mat).reshape(-1, 3)  # axis-angle
+    # Avoid torchgeometry.rotation_matrix_to_angle_axis (compat bug with torch>=2.1).
+    axis_angle = mat3x3_to_axis_angle(rot_mat)
     axis_angle[torch.isnan(axis_angle)] = 0.0
     return axis_angle
 
@@ -74,8 +73,49 @@ def mat3x3_to_axis_angle(rot_mat):
         - Input: :Torch:`(N, 3, 3)`
         - Output: :Torch:`(N, 3)`
     """
-    rot_mat = torch.cat([rot_mat, torch.zeros((rot_mat.shape[0], 3, 1), device=rot_mat.device).float()], 2)
-    axis_angle = tgm.rotation_matrix_to_angle_axis(rot_mat).reshape(-1, 3)  # axis-angle
+    # Pure PyTorch rotation matrix -> axis-angle conversion.
+    # rot_mat: (N, 3, 3)
+    R = rot_mat.float()
+    eps = 1e-6
+
+    trace = R[..., 0, 0] + R[..., 1, 1] + R[..., 2, 2]  # (N,)
+    cos_theta = (trace - 1.0) / 2.0
+    cos_theta = torch.clamp(cos_theta, -1.0 + 1e-7, 1.0 - 1e-7)
+    theta = torch.acos(cos_theta)  # (N,)
+    sin_theta = torch.sin(theta)  # (N,)
+
+    # axis numerator: (R - R^T) / 2
+    axis_num = torch.stack(
+        [R[..., 2, 1] - R[..., 1, 2], R[..., 0, 2] - R[..., 2, 0], R[..., 1, 0] - R[..., 0, 1]],
+        dim=-1,
+    )  # (N,3)
+
+    denom = 2.0 * sin_theta  # (N,)
+    axis = torch.zeros_like(axis_num)  # (N,3)
+    mask = denom.abs() > eps  # (N,)
+    axis[mask] = axis_num[mask] / denom[mask].unsqueeze(-1)
+
+    axis_angle = axis * theta.unsqueeze(-1)  # (N,3)
+
+    # Handle near-zero sin(theta): either theta ~ 0 (axis-angle ~ 0) or theta ~ pi (axis from diagonal).
+    mask_small = ~mask
+    if mask_small.any():
+        mask_pi = mask_small & (cos_theta < 0)
+        if mask_pi.any():
+            # axis components from diagonal entries
+            ax = torch.sqrt(torch.clamp((R[..., 0, 0] + 1.0) / 2.0, min=0.0))
+            ay = torch.sqrt(torch.clamp((R[..., 1, 1] + 1.0) / 2.0, min=0.0))
+            az = torch.sqrt(torch.clamp((R[..., 2, 2] + 1.0) / 2.0, min=0.0))
+            # recover signs from off-diagonals
+            ax = torch.where((R[..., 2, 1] - R[..., 1, 2]) >= 0, ax, -ax)
+            ay = torch.where((R[..., 0, 2] - R[..., 2, 0]) >= 0, ay, -ay)
+            az = torch.where((R[..., 1, 0] - R[..., 0, 1]) >= 0, az, -az)
+            axis_pi = torch.stack([ax, ay, az], dim=-1)
+            axis_angle_pi = axis_pi * torch.pi
+            axis_angle[mask_pi] = axis_angle_pi[mask_pi]
+
+        # theta ~ 0 already gives near-zero axis_angle; keep as-is (axis_angle is zeros here).
+
     axis_angle[torch.isnan(axis_angle)] = 0.0
     return axis_angle
 

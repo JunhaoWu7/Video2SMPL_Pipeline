@@ -436,10 +436,12 @@ def run(args: argparse.Namespace) -> None:
     _AXIS_ANGLE_TO_MATRIX_FN = axis_angle_to_matrix
 
     class EchoModule:
-        smooth_motion_rep = staticmethod(smooth_motion_rep)
-        smpl_dict_to_rot6d = staticmethod(smpl_dict_to_rot6d)
-        rot6d_to_smpl_dict = staticmethod(rot6d_to_smpl_dict)
-        linear_interpolate_frame_ids = staticmethod(linear_interpolate_frame_ids)
+        pass
+
+    EchoModule.smooth_motion_rep = staticmethod(smooth_motion_rep)
+    EchoModule.smpl_dict_to_rot6d = staticmethod(smpl_dict_to_rot6d)
+    EchoModule.rot6d_to_smpl_dict = staticmethod(rot6d_to_smpl_dict)
+    EchoModule.linear_interpolate_frame_ids = staticmethod(linear_interpolate_frame_ids)
 
     smpl_model_path = vendor_root / "extract_motion" / "CameraHMR" / "data" / "models" / "SMPL" / "SMPL_NEUTRAL.pkl"
     if not smpl_model_path.exists():

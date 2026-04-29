@@ -4,15 +4,17 @@ torchvision==0.21.0
 torchaudio==2.6.0
 
 # Numeric / IO
-numpy==1.26.0
+numpy==1.23.5
 opencv-python==4.11.0.86
 tqdm
+typing_extensions>=4.5
 ffmpeg-python
 imageio[ffmpeg]
 imageio[pyav]
 
 # Human model / geometry
 smplx==0.1.28
+chumpy
 trimesh>=3.22.0
 torchgeometry==0.1.2
 einops
@@ -25,6 +27,7 @@ loguru==0.7.3
 scikit-image
 omegaconf
 ultralytics
+lap>=0.5.12
 
 # detectron2 runtime deps
 fvcore

@@ -158,10 +158,12 @@ def run(args: argparse.Namespace) -> None:
     from scripts.data_processors.motion_alignment.seq_utils import linear_interpolate_frame_ids  # type: ignore
 
     class EchoModule:
-        smooth_motion_rep = staticmethod(smooth_motion_rep)
-        smpl_dict_to_rot6d = staticmethod(smpl_dict_to_rot6d)
-        rot6d_to_smpl_dict = staticmethod(rot6d_to_smpl_dict)
-        linear_interpolate_frame_ids = staticmethod(linear_interpolate_frame_ids)
+        pass
+
+    EchoModule.smooth_motion_rep = staticmethod(smooth_motion_rep)
+    EchoModule.smpl_dict_to_rot6d = staticmethod(smpl_dict_to_rot6d)
+    EchoModule.rot6d_to_smpl_dict = staticmethod(rot6d_to_smpl_dict)
+    EchoModule.linear_interpolate_frame_ids = staticmethod(linear_interpolate_frame_ids)
 
     mapping_path = work_root / args.mapping_name
     id_mapping: List[Dict[str, str]] = _load_id_mapping(mapping_path)
@@ -361,7 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Re-run videos that are already in the mapping (reuse the same sample_id). New videos always append after the current max id.",
     )
     parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--max_frames", type=int, default=300)
+    parser.add_argument("--max_frames", type=int, default=500, help="Maximum number of frames to process per video")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--person_idx", type=int, default=0)
     parser.add_argument("--smooth_window", type=int, default=5)

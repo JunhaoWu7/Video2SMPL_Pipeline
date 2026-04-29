@@ -7,6 +7,11 @@
 3. 输出目录结构对齐到 CameraHMR 后处理产物
 4. 每次运行都新建一个新的 run 文件夹，不覆盖历史结果
 
+依赖路径约定：
+- `--vendor_root` 默认是 `third_party`
+- CameraHMR 权重统一读取 `third_party/extract_motion/CameraHMR/data/...`
+- 若出现 `third_party/extract_motion/data/...` 报错，说明代码版本过旧，请先更新代码
+
 ---
 
 ## 输入格式要求（外来 SMPL）

@@ -92,6 +92,11 @@ cd /root/projects/Video2SMPL
 python -m pip install -U pip setuptools wheel
 python -m pip install -r requirements.txt -i 
 ```
+如果chumpy报错，可以单独这样下载
+pip install chumpy -i https://pypi.org/simple
+# 或者直接
+pip install -r requirements.txt -i https://pypi.org/simple
+
 
 3) 安装 detectron2（CameraHMR 需要）
 ```bash
@@ -135,6 +140,10 @@ bash extract_motion/CameraHMR/fetch_pretrained_models.sh
 - 代码加载权重已改为基于 `third_party/extract_motion/CameraHMR/core/constants.py` 的绝对路径拼接，不依赖外部仓库目录。
 - `fetch_pretrained_models.sh` 现在会同时下载 YOLO 跟踪权重（`yolov8x.pt`），不需要首跑时再自动拉取。
 
+常见报错排查：
+- 若出现 `Path .../third_party/extract_motion/data/... does not exist`，说明使用了旧版路径逻辑；请更新到当前代码版本（应固定读取 `third_party/extract_motion/CameraHMR/data/...`）。
+- 再执行一次权重自检（见下方脚本），确认 `SMPL_NEUTRAL.pkl` 与 `pretrained-models/*.ckpt` 均存在。
+
 5) 一键检查权重是否齐全（可选）
 ```bash
 python - <<'PY'
@@ -162,11 +171,11 @@ PY
 cd /root/projects/Video2SMPL
 python pipeline/run_pipeline.py \
   --root_dir examples/training \
-  --source "my_batch_or_dataset_name" \
+  --source "test" \
   --vendor_root third_party \
   --set_floor \
   --smooth_window 5 \
-  --id_width 6 \
+  --id_width 6 
 ```
 
 必选参数：
@@ -175,6 +184,7 @@ python pipeline/run_pipeline.py \
 
 可选参数：
 - `--id_width`：序号零填充位数，**默认 6**（`000001` …）
+- `--max_frames`：每个视频最多处理多少帧，**默认 500**
 - `--mapping_name`：映射文件名，默认 `sample_id_to_source.json`
 - **追加模式（默认）**：若 `sample_id_to_source.json` 已存在，已登记过的 `rgb_videos` 下相对路径会**跳过**；仅对新视频从「当前最大 sample 编号 + 1」继续编号
 - `--overwrite`：对**已在映射中的**视频强制重跑，**沿用原 sample_id** 覆盖输出；新视频仍走追加编号
