@@ -56,9 +56,8 @@ outputs/
 checkpoints/
 weights/
 datasets/
-data/
 external_smpl_runs/
-third_party/extract_motion/CameraHMR/data/
+data/
 
 # ===== Keep repo structure with placeholders if needed =====
 !examples/.gitkeep
@@ -66,4 +65,5 @@ third_party/extract_motion/CameraHMR/data/
 
 
 third_party/extract_motion/CameraHMR/data/**
+!third_party/extract_motion/CameraHMR/data/
 !third_party/extract_motion/CameraHMR/data/.gitkeep
