@@ -92,8 +92,13 @@ cd /root/projects/Video2SMPL
 python -m pip install -U pip setuptools wheel
 python -m pip install -r requirements.txt -i 
 ```
+
 如果chumpy报错，可以单独这样下载
-pip install chumpy -i https://pypi.org/simple
+
+python -m ensurepip --upgrade
+python -m pip install -U pip setuptools wheel
+
+pip install chumpy==0.70 --no-build-isolation 
 # 或者直接
 pip install -r requirements.txt -i https://pypi.org/simple
 
