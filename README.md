@@ -1,8 +1,7 @@
-#pipeline介绍
-1.video2smpl
-查看Video2SMPL_Readme.md
-2.外部smpl处理
-查看process_external_smpl_README.md
+# pipeline介绍
+
+### 1.video2smpl，查看Video2SMPL_Readme.md
+### 2.外部smpl处理,查看process_external_smpl_README.md
 
 # Video2SMPL 权重放置说明
 
