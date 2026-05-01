@@ -15,13 +15,17 @@ CameraHMR_smpl_results/<000001>/smpl_raw.pt（目录名为递增序号，见 `sa
     cam_t
     verts、joints、fps 等
 
+CameraHMR_smpl_results_smoothed/<000001>/smpls_canonical_group.npz
+
+    canonical（DART）系下、与 manifest 中 smpl_path 对应的 SMPL 参数，轴角制：
+    global_orient (T,3)、body_pose (T,69)、transl (T,3)、betas（按帧或共享形状）
+    另附 intrinsic、frame_mask、bbox_xyxy、bbox_conf、set_floor、coord_note
+
 CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
 
-    这是平滑后导出的包，包含：
-    global_orient/body_pose/transl/betas
-    intrinsic
-    frame_mask、bbox_xyxy、bbox_conf
-    set_floor
+    相机系（incam）下经平滑的 SMPL，供对照与相机索引；manifest 字段 smpl_incam_smooth_path
+    global_orient/body_pose/transl/betas（旋转矩阵存储，与 CameraHMR 输出一致）
+    intrinsic、frame_mask、bbox_xyxy、bbox_conf、set_floor
 
 
 
@@ -38,7 +42,8 @@ CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
     "original_video": "your_source_name.mp4",
     "rgb_path": "processed_trainable_data/000001/rgb.mp4",
     "first_frame": "processed_trainable_data/000001/first_frame.jpg",
-    "smpl_path": "CameraHMR_smpl_results_smoothed/000001/smpls_smoothed_group.npz",
+    "smpl_path": "CameraHMR_smpl_results_smoothed/000001/smpls_canonical_group.npz",
+    "smpl_incam_smooth_path": "CameraHMR_smpl_results_smoothed/000001/smpls_smoothed_group.npz",
     "text": "",
     "type": "video",
     "source": "your_dataset_or_batch_label",
@@ -53,7 +58,8 @@ CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
     "original_video": "your_source_name.mp4",
     "rgb_path": "processed_trainable_data/000001/rgb.mp4",
     "first_frame": "processed_trainable_data/000001/first_frame.jpg",
-    "smpl_path": "CameraHMR_smpl_results_smoothed/000001/smpls_smoothed_group.npz",
+    "smpl_path": "CameraHMR_smpl_results_smoothed/000001/smpls_canonical_group.npz",
+    "smpl_incam_smooth_path": "CameraHMR_smpl_results_smoothed/000001/smpls_smoothed_group.npz",
     "text": "A person performs a smooth yoga transition from plank to downward dog.",
     "type": "video",
     "source": "your_dataset_or_batch_label",
@@ -73,7 +79,7 @@ CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
   - YOLO 跟踪
   - CameraHMR 回归
   - 线性插值 + 高斯时序平滑
-  - `process_hmr_motion` canonicalization / 坐标变换 / 可选 set_floor
+  - `process_hmr_motion` canonicalization / 坐标变换 / set_floor（CLI 默认开启）
 - 参考 CoMoVi 的组织方式，产出第4步后的空文本 JSON（第5/6步打标暂不执行）
 
 ## 环境与依赖（完整下载清单）
@@ -90,7 +96,7 @@ conda activate video2smpl
 ```bash
 cd /root/projects/Video2SMPL
 python -m pip install -U pip setuptools wheel
-python -m pip install -r requirements.txt -i 
+python -m pip install -r requirements.txt 
 ```
 
 如果chumpy报错，可以单独这样下载
@@ -112,6 +118,10 @@ python -m pip install --no-build-isolation "git+https://github.com/facebookresea
 ```bash
 sudo apt-get update
 sudo apt-get install -y ffmpeg
+
+conda clean -i
+conda install -c conda-forge ffmpeg -y
+ffmpeg -version
 ```
 
 运行前准备：
@@ -178,16 +188,17 @@ python pipeline/run_pipeline.py \
   --root_dir examples/training \
   --source "test" \
   --vendor_root third_party \
-  --set_floor \
   --smooth_window 5 \
-  --id_width 6 
+  --id_width 6
 ```
+（`--set-floor` 默认已开启；若不要贴地请加 `--no-set-floor`。）
 
 必选参数：
 
 - `--source`：非空字符串，**必须在开始处理前通过命令行提供**；写入 `train_stage4_empty_text.json` 中每条样本的 `source` 字段（同一 `root_dir` 下本次生成的 manifest 共用该标签，重跑会按本次传入值覆盖各条目的 `source`）
 
 可选参数：
+- `--set-floor` / `--no-set-floor`：canonical 贴地，**默认开启**（`--set-floor`）；坐姿/躺姿多或不想抬到地面时用 `--no-set-floor`
 - `--id_width`：序号零填充位数，**默认 6**（`000001` …）
 - `--max_frames`：每个视频最多处理多少帧，**默认 500**
 - `--mapping_name`：映射文件名，默认 `sample_id_to_source.json`
@@ -201,7 +212,8 @@ python pipeline/run_pipeline.py \
   - `bbox.pt`
   - `smpl_raw.pt`
 - `examples/training/CameraHMR_smpl_results_smoothed/<000001>/`
-  - `motion_postprocess.pt`
+  - `motion_postprocess.pt`（含 `smpl_params_canonical`）
+  - `smpls_canonical_group.npz`
   - `smpls_smoothed_group.npz`
 - `examples/training/processed_trainable_data/<000001>/`
   - `rgb.mp4`
@@ -209,4 +221,4 @@ python pipeline/run_pipeline.py \
 - `examples/training/sample_id_to_source.json`
   - `items[]`：`sample_id`、`seq_index`、`original_filename`、`original_stem`、`original_path_relative`、`output_sample_dir`
 - `examples/training/train_stage4_empty_text.json`
-  - 额外字段：`sample_id`、`original_video`；以及 `rgb_path` / `first_frame` / `smpl_path` / `text=""` / `type` / `source` / `link`
+  - 额外字段：`sample_id`、`original_video`；以及 `rgb_path` / `first_frame` / `smpl_path`（canonical npz）/ `smpl_incam_smooth_path` / `text=""` / `type` / `source` / `link`

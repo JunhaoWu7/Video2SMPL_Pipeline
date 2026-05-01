@@ -91,7 +91,8 @@ python pipeline/process_external_smpl.py \
 - `external_smpl_mapping.json`：本次处理映射
 - `CameraHMR_smpl_results/<sample_id>/smpl_raw.pt`
 - `CameraHMR_smpl_results_smoothed/<sample_id>/motion_postprocess.pt`
-- `CameraHMR_smpl_results_smoothed/<sample_id>/smpls_smoothed_group.npz`
+- `CameraHMR_smpl_results_smoothed/<sample_id>/smpls_canonical_group.npz`
+- `CameraHMR_smpl_results_smoothed/<sample_id>/smpls_smoothed_group.npz`（incam 平滑）
 
 > `sample_id` 默认从 `--start_id` 开始按 `--id_width` 零填充递增。
 

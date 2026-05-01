@@ -72,7 +72,12 @@ def canonicalize_motion(smpl_params, joints, set_floor=False, debug=False, smpl_
     if use_shape:
         motion = motion[:, :-10]
 
-    return motion, joints[:-1], R_inv, delta_transl
+    # Detached copy for export (axis-angle global_orient/body_pose, canonical transl, betas)
+    smpl_params_canonical = {
+        k: (v.detach().clone() if torch.is_tensor(v) else v)
+        for k, v in aligned_smpl_params.items()
+    }
+    return motion, joints[:-1], R_inv, delta_transl, smpl_params_canonical
 
 def process_hmr_motion(hmr_motion, intrinsic, to_cpu=True, set_floor=False, collect_local_motion=False, use_shape=False):
     new_data = {}
@@ -92,8 +97,11 @@ def process_hmr_motion(hmr_motion, intrinsic, to_cpu=True, set_floor=False, coll
         local_motion = collect_motion_rep_DART(smpl_params_amass, joints_amass)[:, -(JOINT_NUM*6+18):]
 
     # Step2: amass -> dart
-    aligned_motion, joints_canonical, R_inv, delta_transl = canonicalize_motion(smpl_params_amass, joints_amass, set_floor=set_floor, debug=False, use_shape=use_shape)
+    aligned_motion, joints_canonical, R_inv, delta_transl, smpl_params_canonical = canonicalize_motion(
+        smpl_params_amass, joints_amass, set_floor=set_floor, debug=False, use_shape=use_shape
+    )
     new_data['motion'] = aligned_motion.detach()
+    new_data['smpl_params_canonical'] = smpl_params_canonical
     if collect_local_motion:
         new_data['motion'] = torch.cat([new_data['motion'], local_motion], dim=-1)
     # rotation
@@ -110,7 +118,16 @@ def process_hmr_motion(hmr_motion, intrinsic, to_cpu=True, set_floor=False, coll
     new_data['extrinsic'] = extrinsic.detach()
     new_data['intrinsic'] = intrinsic.detach()
     if to_cpu:
-        new_data = {k: v.cpu() for k, v in new_data.items()}
+        cpu_data = {}
+        for k, v in new_data.items():
+            if k == 'smpl_params_canonical':
+                cpu_data[k] = {
+                    kk: vv.cpu() if torch.is_tensor(vv) else vv
+                    for kk, vv in v.items()
+                }
+            else:
+                cpu_data[k] = v.cpu() if torch.is_tensor(v) else v
+        new_data = cpu_data
     
     return new_data, joints_canonical
 

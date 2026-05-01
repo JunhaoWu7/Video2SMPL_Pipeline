@@ -33,7 +33,7 @@ _CAMERAHMR_SCRIPTS = os.path.join(_CAMERAHMR_ROOT, 'scripts')
 if _CAMERAHMR_SCRIPTS not in sys.path:
     sys.path.insert(0, _CAMERAHMR_SCRIPTS)
 
-SMPL_MODEL_PATH = os.path.join(_CAMERAHMR_ROOT, 'data', 'models', 'SMPL', 'SMPL_NEUTRAL.pkl')
+from core.constants import SMPL_MODEL_PATH
 
 from scripts.data_processors.smpl.constants import JOINT_NUM
 
@@ -86,10 +86,9 @@ class MotionExtractor:
         
         self.mesh_estimator = HumanMeshEstimator(smpl_model_path=smpl_model_path)
         self.tracker = Tracker()
-        
-        SMPL_MODEL_PATH = os.path.join(_CAMERAHMR_ROOT, 'data', 'models', 'SMPL', 'SMPL_NEUTRAL.pkl')
-        logger.info(f"Loading SMPL model from: {SMPL_MODEL_PATH}")
-        self.smpl_model = smplx.SMPLLayer(model_path=SMPL_MODEL_PATH, num_betas=10).to(self.device)
+
+        logger.info(f"Loading SMPL model from: {smpl_model_path}")
+        self.smpl_model = smplx.SMPLLayer(model_path=smpl_model_path, num_betas=10).to(self.device)
         
     def extract_bbox(self, video_path: str, output_path: Optional[str] = None, overwrite: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -279,6 +278,7 @@ class MotionExtractor:
         all_joints_canonical = []
         all_extrinsics = []
         all_smpl_params = []
+        all_smpl_params_canonical: list = []
         
         for person_idx in range(num_persons):
             person_smpl_params = {k: v[person_idx] for k, v in smpl_params.items()}
@@ -366,6 +366,7 @@ class MotionExtractor:
             
             motion_person = processed['motion']
             extrinsic_person = processed['extrinsic']
+            all_smpl_params_canonical.append(processed['smpl_params_canonical'])
             
             all_motions.append(motion_person)
             all_joints_canonical.append(joints_canonical_person)
@@ -382,12 +383,31 @@ class MotionExtractor:
         
         smpl_params_0 = all_smpl_params[0] if num_persons >= 1 else None
         betas_final = smpl_params_0.get('betas') if smpl_params_0 else None
+
+        if num_persons == 1:
+            smpl_params_canonical_out = {
+                k: (v.detach().cpu() if torch.is_tensor(v) else v)
+                for k, v in all_smpl_params_canonical[0].items()
+            }
+        else:
+            smpl_params_canonical_out = {}
+            for k in all_smpl_params_canonical[0].keys():
+                parts = [p[k] for p in all_smpl_params_canonical]
+                if parts[0] is None:
+                    smpl_params_canonical_out[k] = None
+                    continue
+                smpl_params_canonical_out[k] = torch.stack(
+                    [t.detach().cpu() if torch.is_tensor(t) else t for t in parts], dim=0
+                )
         
         result = {
             'motion': motion.detach().cpu(),
             'extrinsic': extrinsic.detach().cpu(),
             'intrinsic': intrinsic.detach().cpu() if intrinsic is not None else None,
             'joints_canonical': joints_canonical.detach().cpu(),
+            # DART canonical frame: axis-angle global_orient (T,3), body_pose (T,69), transl (T,3), betas
+            'smpl_params_canonical': smpl_params_canonical_out,
+            # incam / raw CameraHMR (not canonical); kept for debugging & overlays
             'smpl_params': {
                 'global_orient': smpl_params['global_orient'].detach().cpu(),
                 'body_pose': smpl_params['body_pose'].detach().cpu(),

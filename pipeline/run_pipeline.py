@@ -91,6 +91,23 @@ def _load_manifest_preserve(path: Path) -> Dict[str, Dict[str, str]]:
     return out
 
 
+def _canonical_smpl_to_npz_dict(
+    smpl_params_canonical: Dict[str, torch.Tensor],
+    person_idx: int,
+    num_persons: int,
+) -> Dict[str, np.ndarray]:
+    """If multi-person, select `person_idx`; all arrays float32 numpy for np.savez."""
+    out: Dict[str, np.ndarray] = {}
+    for key, val in smpl_params_canonical.items():
+        if val is None:
+            continue
+        t = val.detach().cpu()
+        if num_persons > 1:
+            t = t[person_idx]
+        out[key] = t.float().numpy().astype(np.float32)
+    return out
+
+
 def _smooth_smpl_for_one_person(
     person_smpl_params: Dict[str, torch.Tensor],
     frame_mask: Optional[torch.Tensor],
@@ -130,6 +147,12 @@ def _resolve_manifest_link(args: argparse.Namespace) -> str:
 def run(args: argparse.Namespace) -> None:
     if args.id_width < 1:
         raise ValueError("--id_width must be >= 1")
+
+    wr = str(getattr(args, "weight_root", "") or "").strip()
+    if wr:
+        os.environ["VIDEO2SMPL_WEIGHT_ROOT"] = str(Path(wr).expanduser().resolve())
+    else:
+        os.environ["VIDEO2SMPL_WEIGHT_ROOT"] = ""
 
     manifest_source = str(args.source).strip()
     if not manifest_source:
@@ -224,6 +247,7 @@ def run(args: argparse.Namespace) -> None:
         smpl_raw_path = sample_raw / "smpl_raw.pt"
         postprocess_path = sample_smooth / "motion_postprocess.pt"
         smpl_npz_path = sample_smooth / "smpls_smoothed_group.npz"
+        smpl_canonical_npz_path = sample_smooth / "smpls_canonical_group.npz"
 
         bbx_xyxy, conf, frame_mask = extractor.extract_bbox(
             video_path=str(video_path),
@@ -246,6 +270,21 @@ def run(args: argparse.Namespace) -> None:
         torch.save(post_res, postprocess_path)
 
         person_idx = args.person_idx
+        num_persons = int(smpl_data["smpl_params_incam"]["global_orient"].shape[0])
+        canon_np = _canonical_smpl_to_npz_dict(
+            post_res["smpl_params_canonical"], person_idx, num_persons
+        )
+        np.savez(
+            smpl_canonical_npz_path,
+            **canon_np,
+            intrinsic=smpl_data["intrinsic"].detach().cpu().numpy(),
+            frame_mask=frame_mask.detach().cpu().numpy(),
+            bbox_xyxy=bbx_xyxy.detach().cpu().numpy(),
+            bbox_conf=conf.detach().cpu().numpy(),
+            set_floor=np.array([int(args.set_floor)], dtype=np.int32),
+            coord_note=np.bytes_("canonical_dart_smpl_axis_angle"),
+        )
+
         smpl_incam = {k: v[person_idx].detach().cpu() for k, v in smpl_data["smpl_params_incam"].items()}
         smpl_smooth = _smooth_smpl_for_one_person(
             person_smpl_params=smpl_incam,
@@ -293,7 +332,8 @@ def run(args: argparse.Namespace) -> None:
         sid = item["sample_id"]
         rgb_rel = f"processed_trainable_data/{sid}/rgb.mp4"
         ff_rel = f"processed_trainable_data/{sid}/first_frame.jpg"
-        smpl_rel = f"CameraHMR_smpl_results_smoothed/{sid}/smpls_smoothed_group.npz"
+        smpl_rel = f"CameraHMR_smpl_results_smoothed/{sid}/smpls_canonical_group.npz"
+        smpl_incam_rel = f"CameraHMR_smpl_results_smoothed/{sid}/smpls_smoothed_group.npz"
         old = prev_manifest.get(sid, {})
         text_val = old.get("text", "")
         if not text_val:
@@ -308,6 +348,7 @@ def run(args: argparse.Namespace) -> None:
                 "rgb_path": rgb_rel,
                 "first_frame": ff_rel,
                 "smpl_path": smpl_rel,
+                "smpl_incam_smooth_path": smpl_incam_rel,
                 "text": text_val,
                 "type": "video",
                 "source": manifest_source,
@@ -342,6 +383,12 @@ def run(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Video2SMPL custom pipeline (steps 1-4 + empty-text manifest)")
     parser.add_argument("--root_dir", type=str, default="examples/training")
+    parser.add_argument(
+        "--weight_root",
+        type=str,
+        default="/data1/wjh/Video2SMPL",
+        help="CameraHMR / SMPL / YOLO / Detectron 等权重所在目录（扁平放置）。传空字符串 \"\" 则仅用仓库内 third_party/.../data/",
+    )
     parser.add_argument("--vendor_root", type=str, default="third_party")
     parser.add_argument("--manifest_name", type=str, default="train_stage4_empty_text.json")
     parser.add_argument(
@@ -367,7 +414,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--person_idx", type=int, default=0)
     parser.add_argument("--smooth_window", type=int, default=5)
-    parser.add_argument("--set_floor", action="store_true")
+    parser.add_argument(
+        "--set-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Canonical DART 贴地（默认开启，适合站立/行走/地面操作等机器人常用动作）。使用 --no-set-floor 关闭。",
+    )
     parser.add_argument("--use_shape", action="store_true")
 
     parser.add_argument(

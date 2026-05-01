@@ -1,6 +1,8 @@
 import os
 
 from ultralytics import YOLO
+
+from core.constants import YOLO_WEIGHT_PATH
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -34,14 +36,7 @@ def moving_average_smooth(x, window_size=5, dim=-1):
 class Tracker:
     def __init__(self) -> None:
         # https://docs.ultralytics.com/modes/predict/
-        yolo_weight = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..",
-            "data",
-            "yolo",
-            "yolov8x.pt",
-        )
-        self.yolo = YOLO(yolo_weight)
+        self.yolo = YOLO(YOLO_WEIGHT_PATH)
 
     def track(self, video_path):
         track_history = []

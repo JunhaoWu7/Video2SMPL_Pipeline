@@ -305,11 +305,16 @@ def _process_one_external(
         sample_raw / "smpl_raw.pt",
     )
 
+    canon_cpu = {
+        k: (v.detach().cpu() if torch.is_tensor(v) else v)
+        for k, v in processed["smpl_params_canonical"].items()
+    }
     post_res = {
         "motion": processed["motion"].detach().cpu(),
         "extrinsic": processed["extrinsic"].detach().cpu(),
         "intrinsic": intrinsic.detach().cpu(),
         "joints_canonical": joints_canonical.detach().cpu(),
+        "smpl_params_canonical": canon_cpu,
         "smpl_params": {
             "global_orient": global_orient_aa.detach().cpu(),
             "body_pose": body_pose_aa.detach().cpu(),
@@ -335,11 +340,28 @@ def _process_one_external(
         set_floor=np.array([int(set_floor)], dtype=np.int32),
     )
 
+    canon_np = {
+        k: v.float().numpy().astype(np.float32)
+        for k, v in canon_cpu.items()
+        if v is not None and torch.is_tensor(v)
+    }
+    np.savez(
+        sample_smooth / "smpls_canonical_group.npz",
+        **canon_np,
+        intrinsic=intrinsic.detach().cpu().numpy(),
+        frame_mask=frame_mask.detach().cpu().numpy(),
+        bbox_xyxy=np.zeros((num_frames, 4), dtype=np.float32),
+        bbox_conf=np.ones((num_frames,), dtype=np.float32),
+        set_floor=np.array([int(set_floor)], dtype=np.int32),
+        coord_note=np.bytes_("canonical_dart_smpl_axis_angle"),
+    )
+
     return {
         "sample_id": sample_id,
         "external_smpl_file": str(in_file),
         "num_frames": num_frames,
-        "smpl_npz": f"CameraHMR_smpl_results_smoothed/{sample_id}/smpls_smoothed_group.npz",
+        "smpl_npz": f"CameraHMR_smpl_results_smoothed/{sample_id}/smpls_canonical_group.npz",
+        "smpl_incam_smooth_npz": f"CameraHMR_smpl_results_smoothed/{sample_id}/smpls_smoothed_group.npz",
         "motion_postprocess": f"CameraHMR_smpl_results_smoothed/{sample_id}/motion_postprocess.pt",
     }
 

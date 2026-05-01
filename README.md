@@ -42,6 +42,10 @@ bash extract_motion/CameraHMR/fetch_pretrained_models.sh
 - `smpl_mean_params.npz` -> `third_party/extract_motion/CameraHMR/data/`
 - `yolov8x.pt` -> `third_party/extract_motion/CameraHMR/data/yolo/`
 
+
+## 注意这个放置位置不同 
+- ` smplx_root.pt `  -> `third_party/extract_motion/CameraHMR/scripts/data_processors/motion_alignment/ `
+
 ## 一键自检（存在性 + 基础可读性）
 
 ```bash
