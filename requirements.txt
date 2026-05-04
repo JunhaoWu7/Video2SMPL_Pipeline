@@ -33,3 +33,7 @@ lap>=0.5.12
 fvcore
 iopath
 pycocotools
+
+# text label
+openai
+

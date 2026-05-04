@@ -108,6 +108,31 @@ def _canonical_smpl_to_npz_dict(
     return out
 
 
+def _betas_np_from_smoothed(
+    smpl_smooth: Dict[str, torch.Tensor],
+    T_canonical: int,
+) -> np.ndarray:
+    """Build (T, 10) float32 betas for canonical NPZ from smoothed incam tensors."""
+    b = smpl_smooth.get("betas")
+    if b is None:
+        return np.zeros((T_canonical, 10), dtype=np.float32)
+    t = b.detach().cpu().float()
+    if t.ndim == 1:
+        if t.numel() != 10:
+            raise ValueError(f"Expected betas (10,), got {tuple(t.shape)}")
+        row = t.numpy().astype(np.float32)
+        return np.tile(row[None, :], (T_canonical, 1))
+    if t.ndim != 2 or t.shape[1] != 10:
+        raise ValueError(f"Expected betas (T,10), got {tuple(t.shape)}")
+    arr = t.numpy().astype(np.float32)
+    if arr.shape[0] == T_canonical:
+        return arr
+    if arr.shape[0] > T_canonical:
+        return arr[:T_canonical]
+    pad = np.tile(arr[-1:], (T_canonical - arr.shape[0], 1))
+    return np.concatenate([arr, pad], axis=0)
+
+
 def _smooth_smpl_for_one_person(
     person_smpl_params: Dict[str, torch.Tensor],
     frame_mask: Optional[torch.Tensor],
@@ -271,9 +296,19 @@ def run(args: argparse.Namespace) -> None:
 
         person_idx = args.person_idx
         num_persons = int(smpl_data["smpl_params_incam"]["global_orient"].shape[0])
+        smpl_incam = {k: v[person_idx].detach().cpu() for k, v in smpl_data["smpl_params_incam"].items()}
+        smpl_smooth = _smooth_smpl_for_one_person(
+            person_smpl_params=smpl_incam,
+            frame_mask=frame_mask.detach().cpu(),
+            smooth_window=args.smooth_window,
+            echo_module=EchoModule,
+        )
+
         canon_np = _canonical_smpl_to_npz_dict(
             post_res["smpl_params_canonical"], person_idx, num_persons
         )
+        T_canon = int(canon_np["global_orient"].shape[0])
+        canon_np["betas"] = _betas_np_from_smoothed(smpl_smooth, T_canon)
         np.savez(
             smpl_canonical_npz_path,
             **canon_np,
@@ -285,20 +320,17 @@ def run(args: argparse.Namespace) -> None:
             coord_note=np.bytes_("canonical_dart_smpl_axis_angle"),
         )
 
-        smpl_incam = {k: v[person_idx].detach().cpu() for k, v in smpl_data["smpl_params_incam"].items()}
-        smpl_smooth = _smooth_smpl_for_one_person(
-            person_smpl_params=smpl_incam,
-            frame_mask=frame_mask.detach().cpu(),
-            smooth_window=args.smooth_window,
-            echo_module=EchoModule,
-        )
-        betas = smpl_incam.get("betas")
+        betas_for_smooth_npz = smpl_smooth.get("betas")
+        if betas_for_smooth_npz is not None:
+            betas_smooth_out = betas_for_smooth_npz.detach().cpu().numpy().astype(np.float32)
+        else:
+            betas_smooth_out = np.zeros((10,), dtype=np.float32)
         np.savez(
             smpl_npz_path,
             global_orient=smpl_smooth["global_orient"].numpy(),
             body_pose=smpl_smooth["body_pose"].numpy(),
             transl=smpl_smooth["transl"].numpy(),
-            betas=betas.numpy() if betas is not None else np.zeros((10,), dtype=np.float32),
+            betas=betas_smooth_out,
             intrinsic=smpl_data["intrinsic"].detach().cpu().numpy(),
             frame_mask=frame_mask.detach().cpu().numpy(),
             bbox_xyxy=bbx_xyxy.detach().cpu().numpy(),

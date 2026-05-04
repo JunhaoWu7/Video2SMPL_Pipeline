@@ -217,6 +217,30 @@ def _smooth_smpl_for_one_person(
     return echo_module.rot6d_to_smpl_dict(smpl_6d)
 
 
+def _betas_np_from_smooth_tensor(
+    betas: Optional[torch.Tensor],
+    T_canonical: int,
+) -> np.ndarray:
+    """(T,10) float32 for canonical NPZ from smoothed betas (10,) or (T,10)."""
+    if betas is None:
+        return np.zeros((T_canonical, 10), dtype=np.float32)
+    t = betas.detach().cpu().float()
+    if t.ndim == 1:
+        if t.numel() != 10:
+            raise ValueError(f"Expected betas (10,), got {tuple(t.shape)}")
+        row = t.numpy().astype(np.float32)
+        return np.tile(row[None, :], (T_canonical, 1))
+    if t.ndim != 2 or t.shape[1] != 10:
+        raise ValueError(f"Expected betas (T,10), got {tuple(t.shape)}")
+    arr = t.numpy().astype(np.float32)
+    if arr.shape[0] == T_canonical:
+        return arr
+    if arr.shape[0] > T_canonical:
+        return arr[:T_canonical]
+    pad = np.tile(arr[-1:], (T_canonical - arr.shape[0], 1))
+    return np.concatenate([arr, pad], axis=0)
+
+
 def _process_one_external(
     in_file: Path,
     out_dir: Path,
@@ -345,6 +369,8 @@ def _process_one_external(
         for k, v in canon_cpu.items()
         if v is not None and torch.is_tensor(v)
     }
+    T_canon = int(canon_np["global_orient"].shape[0])
+    canon_np["betas"] = _betas_np_from_smooth_tensor(betas, T_canon)
     np.savez(
         sample_smooth / "smpls_canonical_group.npz",
         **canon_np,

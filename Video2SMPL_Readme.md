@@ -50,8 +50,37 @@ CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
     "link": "optional_url_or_empty"
   }
 ]
-5.调用大模型打标（分开做）（comovi）
-6.组织成json格式（打标后确保文本被写入对应数据条）（comovi）
+5.调用大模型打标（本仓库脚本）（comovi）
+
+依赖（可与 SMPL 环境分开装）：`pip install openai pillow httpx`；并设置 `OPENAI_API_KEY` 或 `OPENROUTER_API_KEY`（与脚本内 OpenRouter 默认 `base_url` 一致时可配 `OPENAI_BASE_URL`）。
+
+在 **`run_pipeline` 的 `--root_dir`** 下，已生成 `train_stage4_empty_text.json` 后，从每条样本的 `rgb_path`（`processed_trainable_data/<id>/rgb.mp4`）均匀抽帧，调用多模态 API，把描述写入 **`text`**，默认输出到同目录 **`train_stage5_with_text.json`**（结构与原 manifest 相同，仅 `text` 从空变有）。`generate_sequence_captions.py` **仅用于本 pipeline**，`--manifest` 与 `--pipeline-root` 为必填参数。
+
+```bash
+cd /path/to/Video2SMPL_Pipeline
+# 只检查路径与抽帧（不调 API）
+python generate_sequence_captions.py --dry-run \
+  --manifest examples/training/train_stage4_empty_text.json \
+  --pipeline-root examples/training
+
+python generate_sequence_captions.py \
+  --manifest examples/training/train_stage4_empty_text.json \
+  --pipeline-root examples/training \
+  --output-manifest examples/training/train_stage5_with_text.json \
+  --model openai/gpt-4o \
+  --num-frames 12 \
+  --caption-lang en \
+  --resume
+```
+
+说明：
+
+- `--workers`：并行请求数，**默认 4**；显式写 `--workers 1` 则退化为完全串行。若出现 **429 / rate limit**，把并发调小或略增大 `--sleep`。
+- `--resume`：已写入过非空 `text` 的 `sample_id` 会跳过；中断后重跑可接着补全（需固定 `--output-manifest` 与首次一致）。
+- 若本机已装 **OpenCV**（`requirements.txt` 中已含），优先从 `rgb.mp4` 抽多帧；否则仅能用 `first_frame` 单图，建议安装 `opencv-python`。
+- 也可把 `--output-manifest` 指回 `train_stage4_empty_text.json` 覆盖原文件（不推荐，易与 stage4 混淆）。
+
+6.组织成json格式（打标后 `text` 已写在输出 manifest 各条中，可直接用于训练/下游）（comovi）
 [
   {
     "sample_id": "000001",
