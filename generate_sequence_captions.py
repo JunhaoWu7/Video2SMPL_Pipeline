@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-Fill `text` in Video2SMPL pipeline manifests using an OpenAI-compatible vision API.
+Fill ``caption`` and ``action_caption`` in the unified pipeline manifest (in-place by default).
 
-Reads a JSON list (e.g. train_stage4_empty_text.json), resolves rgb_path / first_frame under
---pipeline-root, uniformly samples frames from rgb.mp4 (fallback: first_frame), and writes
-train_stage5_with_text.json (or --output-manifest) with each row's `text` set from model output.
+Reads a JSON list (e.g. dataset_manifest.json), resolves video_path / rgb_path / first_frame
+under --pipeline-root, calls a vision API, and writes both fields back to the same manifest.
 
 Usage:
   export OPENROUTER_API_KEY=...   # or OPENAI_API_KEY
   pip install openai pillow httpx
 
     python generate_sequence_captions.py \
-    --manifest examples/training/train_stage4_empty_text.json \
+    --manifest examples/training/dataset_manifest.json \
     --pipeline-root examples/training \
-    --output-manifest examples/training/train_stage5_with_text.json \
     --model google/gemini-2.5-flash-lite \
     --workers 8 \
     --resume
@@ -113,20 +111,29 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("Model output is not a valid JSON object.")
 
 
-def normalize_caption_output(raw: dict[str, Any]) -> dict[str, Any]:
-    """Expect {\"description\": \"...\"}; tolerate plain task_caption if model misbehaves."""
-    desc = str(raw.get("description", "")).strip()
-    if not desc:
-        desc = str(raw.get("task_caption", "")).strip()
-    return {"description": desc, "caption": desc}
+def normalize_caption_output(raw: dict[str, Any]) -> dict[str, str]:
+    """
+    Expect JSON with ``caption`` (1–2 sentences) and ``action_caption`` (short action phrase).
+    Tolerates legacy keys: description, task_caption.
+    """
+    caption = str(raw.get("caption", "")).strip()
+    if not caption:
+        caption = str(raw.get("description", "")).strip()
+    if not caption:
+        caption = str(raw.get("task_caption", "")).strip()
+
+    action = str(raw.get("action_caption", "")).strip()
+    if not action:
+        action = str(raw.get("action_label", "")).strip()
+    if not action:
+        action = str(raw.get("action", "")).strip()
+
+    return {"caption": caption, "action_caption": action}
 
 
-def manifest_text_from_output(output: dict[str, Any]) -> str:
-    for key in ("description", "caption"):
-        v = str(output.get(key, "")).strip()
-        if v:
-            return v
-    return ""
+def captions_from_output(output: dict[str, Any]) -> tuple[str, str]:
+    norm = normalize_caption_output(output)
+    return norm["caption"], norm["action_caption"]
 
 
 def load_manifest_list(path: Path) -> list[dict[str, Any]]:
@@ -184,15 +191,21 @@ def sample_frames_from_video(video_path: Path, num_frames: int, max_side: int) -
 def build_data_urls_for_manifest_row(
     root: Path, row: dict[str, Any], num_frames: int, max_side: int
 ) -> tuple[list[str], str, list[int]]:
-    rgb_rel = str(row.get("rgb_path", "")).strip()
+    try:
+        from pipeline.manifest import resolve_video_rel
+
+        video_rel = resolve_video_rel(row)
+    except ImportError:
+        video_rel = str(row.get("video_path", "")).strip()
+
     ff_rel = str(row.get("first_frame", "")).strip()
-    rgb_abs = resolve_under_root(root, rgb_rel) if rgb_rel else None
+    video_abs = resolve_under_root(root, video_rel) if video_rel else None
     ff_abs = resolve_under_root(root, ff_rel) if ff_rel else None
 
-    if rgb_abs and rgb_abs.is_file():
-        urls, used = sample_frames_from_video(rgb_abs, num_frames, max_side)
+    if video_abs and video_abs.is_file():
+        urls, used = sample_frames_from_video(video_abs, num_frames, max_side)
         if urls:
-            return urls, "video", used
+            return urls, "video_path", used
 
     if ff_abs and ff_abs.is_file():
         return [image_to_data_url(ff_abs, max_side)], "first_frame", [0]
@@ -216,7 +229,13 @@ def build_user_prompt_manifest(
         "bilingual": "Write the description in English.",
     }.get(caption_lang, "Write the description in English.")
 
-    return f"""You analyze frames from a video clip of human motion (third-person/only one person).
+    action_lang = {
+        "en": "action_caption must be a short English phrase (roughly 3–8 words), verb-led.",
+        "zh": "action_caption 用简短中文动作短语（约 3–12 字），动词开头。",
+        "bilingual": "caption in English; action_caption as a short English phrase.",
+    }.get(caption_lang, "action_caption: short English phrase, verb-led.")
+
+    return f"""You analyze frames from a video clip of human motion (third-person / single person).
 
 Sample id: `{sid}`
 Original filename hint: `{orig}`
@@ -225,18 +244,19 @@ Media type: `{typ}`
 
 You are given {num_sampled_frames} still frames sampled uniformly over time from the clip.
 
-Describe in 1–2 short sentences what the person does: motion, pose changes, and clear interactions with objects or the scene. Do not focus on clothing or looks unless necessary for the action. Stick to what is visible.
-
-Output ONLY a JSON object with exactly one field:
+Output ONLY a JSON object with exactly these two fields:
 {{
-  "description": "1-2 sentences."
+  "caption": "1-2 sentences describing the visible motion, pose changes, and scene interaction.",
+  "action_caption": "Short action phrase naming the main motion (e.g. 'walking forward', 'picking up box')."
 }}
 
 Rules:
-- Single string value only; no bullet lists or extra keys.
+- ``caption``: 1–2 sentences; do not focus on clothing unless needed for the action.
+- ``action_caption``: concise action label for this clip; no full sentences; no bullet lists.
 - {lang_line}
+- {action_lang}
 
-Reply with raw JSON only. No markdown fences, no extra keys, no extra text."""
+Reply with raw JSON only. No markdown fences, no extra keys."""
 
 
 def format_seconds(sec: float) -> str:
@@ -293,12 +313,12 @@ def call_openai_caption_with_prompt(
             },
             {"role": "user", "content": user_content},
         ],
-        max_tokens=300,
+        max_tokens=400,
         temperature=0.3,
     )
     text = resp.choices[0].message.content
     if not text:
-        return {"description": "", "caption": ""}
+        return {"caption": "", "action_caption": ""}
     raw = extract_json_object(text)
     return normalize_caption_output(raw)
 
@@ -309,10 +329,10 @@ def caption_one_sample(
     pipeline_root: Path,
     idx: int,
     row: dict[str, Any],
-) -> tuple[int, str, str, str, str | None, str]:
+) -> tuple[int, str, str, str, str, str | None, str]:
     """
     Run vision API for one manifest row. idx is 1-based list position.
-    Returns (idx, sample_id, status, text, error_message, frame_source).
+    Returns (idx, sample_id, status, caption, action_caption, error_message, frame_source).
     status: ok | error | no_frames
     """
     sid = str(row.get("sample_id", f"row{idx}"))
@@ -320,7 +340,7 @@ def caption_one_sample(
         pipeline_root, row, args.num_frames, args.max_side
     )
     if not data_urls:
-        return (idx, sid, "no_frames", "", None, src)
+        return (idx, sid, "no_frames", "", "", None, src)
 
     user_prompt = build_user_prompt_manifest(row, len(data_urls), args.caption_lang)
     try:
@@ -335,21 +355,21 @@ def caption_one_sample(
             label=sid,
             interval_sec=max(3.0, float(args.heartbeat_sec)),
         )
-        text = manifest_text_from_output(output)
-        return (idx, sid, "ok", text, None, src)
+        caption, action_caption = captions_from_output(output)
+        return (idx, sid, "ok", caption, action_caption, None, src)
     except Exception as e:
-        return (idx, sid, "error", "", str(e), src)
+        return (idx, sid, "error", "", "", str(e), src)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Video2SMPL manifest captions via OpenAI-compatible vision API."
+        description="Fill caption + action_caption in unified pipeline manifest (in-place by default)."
     )
     p.add_argument(
         "--manifest",
         type=Path,
         required=True,
-        help="Stage-4 JSON list (e.g. train_stage4_empty_text.json).",
+        help="Unified manifest JSON (e.g. dataset_manifest.json).",
     )
     p.add_argument(
         "--pipeline-root",
@@ -361,7 +381,7 @@ def parse_args() -> argparse.Namespace:
         "--output-manifest",
         type=Path,
         default=None,
-        help="Default: <manifest_dir>/train_stage5_with_text.json",
+        help="Default: same as --manifest (in-place update).",
     )
     p.add_argument(
         "--model",
@@ -398,7 +418,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--force-recaption",
         action="store_true",
-        help="Call the API for every row even if `text` is already non-empty (e.g. full regenerate).",
+        help="Call the API even when caption and action_caption are already filled.",
     )
     p.add_argument("--dry-run", action="store_true", help="Do not call API; print plan only.")
     p.add_argument(
@@ -473,15 +493,23 @@ def create_openai_client(args: argparse.Namespace) -> tuple[Any, float, str]:
     return OpenAI(**client_kw), t, base_url
 
 
-def hydrate_rows_from_output_manifest(rows: list[dict[str, Any]], out_path: Path) -> None:
-    """
-    If output JSON already exists, copy non-empty `text` into matching `sample_id` rows.
-    Runs whenever out_path exists (no flag required), so reruns do not re-bill filled samples.
-    """
-    if not out_path.is_file():
+def row_captions_complete(row: dict[str, Any]) -> bool:
+    try:
+        from pipeline.manifest import captions_filled
+
+        return captions_filled(row)
+    except ImportError:
+        return bool(str(row.get("caption", "")).strip()) and bool(
+            str(row.get("action_caption", "")).strip()
+        )
+
+
+def hydrate_rows_from_disk(rows: list[dict[str, Any]], disk_path: Path) -> None:
+    """Merge caption fields from on-disk manifest (same or separate output path)."""
+    if not disk_path.is_file():
         return
     try:
-        prev_list = load_manifest_list(out_path)
+        prev_list = load_manifest_list(disk_path)
     except (OSError, json.JSONDecodeError, ValueError):
         return
     prev_by_id = {str(r.get("sample_id", "")): r for r in prev_list}
@@ -490,9 +518,10 @@ def hydrate_rows_from_output_manifest(rows: list[dict[str, Any]], out_path: Path
         old = prev_by_id.get(sid)
         if not old:
             continue
-        tx = str(old.get("text", "")).strip()
-        if tx:
-            r["text"] = old["text"]
+        for key in ("caption", "action_caption", "text"):
+            val = str(old.get(key, "")).strip()
+            if val and not str(r.get(key, "")).strip():
+                r[key] = old[key]
 
 
 def main() -> int:
@@ -510,17 +539,20 @@ def main() -> int:
     pipeline_root = args.pipeline_root.resolve()
     out_path = args.output_manifest
     if out_path is None:
-        out_path = manifest_path.parent / "train_stage5_with_text.json"
+        out_path = manifest_path
     else:
         out_path = out_path.resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    in_place = out_path.resolve() == manifest_path.resolve()
 
     try:
         rows = load_manifest_list(manifest_path)
     except (OSError, json.JSONDecodeError, ValueError) as e:
         print(f"Failed to read manifest: {e}", file=sys.stderr)
         return 1
-    hydrate_rows_from_output_manifest(rows, out_path)
+    hydrate_rows_from_disk(rows, out_path)
+    if not in_place:
+        hydrate_rows_from_disk(rows, manifest_path)
 
     if args.dry_run:
         print(f"Manifest samples: {len(rows)} (pipeline root: {pipeline_root})")
@@ -531,7 +563,7 @@ def main() -> int:
             )
             print(
                 f"  [dry-run] sample_id={sid} frame_source={src} n_images={len(urls)} "
-                f"video_frame_idx={used} text_filled={bool(str(row.get('text','')).strip())}"
+                f"video_frame_idx={used} captions_done={row_captions_complete(row)}"
             )
         if len(rows) > 8:
             print(f"  ... and {len(rows) - 8} more")
@@ -560,8 +592,8 @@ def main() -> int:
     pending: list[tuple[int, dict[str, Any]]] = []
     for idx, row in enumerate(rows, start=1):
         sid = str(row.get("sample_id", f"row{idx}"))
-        if str(row.get("text", "")).strip() and not args.force_recaption:
-            print(f"[{idx}/{total}] skip (already has text): {sid}", flush=True)
+        if row_captions_complete(row) and not args.force_recaption:
+            print(f"[{idx}/{total}] skip (caption + action_caption filled): {sid}", flush=True)
             continue
         pending.append((idx, row))
 
@@ -573,21 +605,36 @@ def main() -> int:
     done_count = 0
     sleep_piece = float(args.sleep) / float(workers) if args.sleep > 0 else 0.0
 
-    def _submit(item: tuple[int, dict[str, Any]]) -> tuple[int, str, str, str, str | None, str]:
+    def _submit(item: tuple[int, dict[str, Any]]) -> tuple[int, str, str, str, str, str | None, str]:
         idx, row = item
         return caption_one_sample(client, args, pipeline_root, idx, row)
+
+    def _apply_captions_to_row(row: dict[str, Any], caption: str, action_caption: str) -> None:
+        try:
+            from pipeline.manifest import apply_captions_update
+
+            updated = apply_captions_update(
+                row, caption=caption, action_caption=action_caption
+            )
+            row.clear()
+            row.update(updated)
+        except ImportError:
+            row["caption"] = caption
+            row["action_caption"] = action_caption
+            row["text"] = caption
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {pool.submit(_submit, item): item for item in pending}
         for fut in as_completed(future_map):
-            idx, sid, status, text, err, src = fut.result()
+            idx, sid, status, caption, action_caption, err, src = fut.result()
             seq_elapsed = time.time() - run_start
             with file_lock:
                 done_count += 1
                 row = rows[idx - 1]
                 if status == "no_frames":
                     err_count += 1
-                    row.setdefault("text", "")
+                    row.setdefault("caption", "")
+                    row.setdefault("action_caption", "")
                     print(
                         f"[done {done_count}/{len(pending)}] [{idx}/{total}] WARN: no frames sample_id={sid}",
                         file=sys.stderr,
@@ -595,7 +642,8 @@ def main() -> int:
                     )
                 elif status == "error":
                     err_count += 1
-                    row.setdefault("text", "")
+                    row.setdefault("caption", "")
+                    row.setdefault("action_caption", "")
                     print(
                         f"[done {done_count}/{len(pending)}] [{idx}/{total}] ERROR {sid}: {err}",
                         file=sys.stderr,
@@ -603,12 +651,13 @@ def main() -> int:
                     )
                 else:
                     ok_count += 1
-                    row["text"] = text
+                    _apply_captions_to_row(row, caption, action_caption)
                     note = ""
                     if src == "first_frame":
                         note = " | note:first_frame_only"
                     print(
                         f"[done {done_count}/{len(pending)}] [{idx}/{total}] ok: {sid} | "
+                        f"action={action_caption!r} | "
                         f"wall={format_seconds(seq_elapsed)} | ok={ok_count} err={err_count}{note}",
                         flush=True,
                     )

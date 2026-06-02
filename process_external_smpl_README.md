@@ -1,6 +1,15 @@
-# process_external_smpl.py 使用说明
+# external_smpl 子阶段使用说明
 
-`process_external_smpl.py` 用于将“外来 SMPL”按 `run_pipeline.py` 的后处理思路做对齐：
+实现位置：`pipeline/stages/external_smpl/`（兼容入口：`pipeline/process_external_smpl.py`）
+
+推荐通过顶层编排运行：
+
+```bash
+python run.py --root_dir examples/training --stages external_smpl \
+  --external_smpl_dir /path/to/external_smpl --self_check_confirm
+```
+
+`process_external_smpl.py` / 本子阶段用于将“外来 SMPL”按 `video2smpl` 的后处理思路做对齐：
 
 1. 先按同链路进行插值与时序平滑（`rot6d` 路径）
 2. 再走 `process_hmr_motion` 做坐标语义变换 / canonicalization（可选 `set_floor`）
@@ -53,7 +62,16 @@
 ### 1) 只做预检（推荐先跑）
 
 ```bash
-cd /root/projects/Video2SMPL
+cd /path/to/Video2SMPL_Pipeline
+python run.py --stages external_smpl \
+  --root_dir examples/training \
+  --vendor_root third_party \
+  --external_smpl_dir /path/to/external_smpl \
+  --glob "*.npz" \
+  --self_check_confirm \
+  --check_only
+
+# 或旧入口
 python pipeline/process_external_smpl.py \
   --root_dir examples/training \
   --vendor_root third_party \
@@ -66,7 +84,17 @@ python pipeline/process_external_smpl.py \
 ### 2) 正式处理（变换 + 插值平滑 + 对齐输出）
 
 ```bash
-cd /root/projects/Video2SMPL
+cd /path/to/Video2SMPL_Pipeline
+python run.py --stages external_smpl \
+  --root_dir examples/training \
+  --vendor_root third_party \
+  --external_smpl_dir /path/to/external_smpl \
+  --glob "*.npz" \
+  --smooth_window 5 \
+  --set_floor \
+  --self_check_confirm
+
+# 或旧入口
 python pipeline/process_external_smpl.py \
   --root_dir examples/training \
   --vendor_root third_party \

@@ -1,0 +1,473 @@
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import cv2
+import numpy as np
+import torch
+
+
+def _setup_vendor_imports(vendor_root: Path) -> None:
+    root_str = str(vendor_root.resolve())
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+
+
+def _group_consecutive_frame_ids(frame_ids: torch.Tensor) -> List[List[int]]:
+    if frame_ids.numel() == 0:
+        return []
+    grouped: List[List[int]] = []
+    current = [int(frame_ids[0].item())]
+    for value in frame_ids[1:]:
+        idx = int(value.item())
+        if idx == current[-1] + 1:
+            current.append(idx)
+        else:
+            grouped.append(current)
+            current = [idx]
+    grouped.append(current)
+    return grouped
+
+
+def _extract_first_frame(video_path: Path, output_jpg: Path) -> None:
+    output_jpg.parent.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(video_path))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        raise RuntimeError(f"Cannot read first frame from video: {video_path}")
+    cv2.imwrite(str(output_jpg), frame)
+
+
+def _parse_sample_id_numeric(sample_id: str) -> Optional[int]:
+    if sample_id.isdigit():
+        return int(sample_id)
+    return None
+
+
+def _max_sample_id_from_dirs(bases: List[Path], id_width: int) -> int:
+    m = 0
+    for base in bases:
+        if not base.exists():
+            continue
+        for d in base.iterdir():
+            if not d.is_dir():
+                continue
+            name = d.name
+            if name.isdigit() and len(name) == id_width:
+                m = max(m, int(name))
+    return m
+
+
+def _load_id_mapping(path: Path) -> List[Dict[str, str]]:
+    if not path.exists():
+        return []
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    return list(data.get("items") or [])
+
+
+def _canonical_smpl_to_npz_dict(
+    smpl_params_canonical: Dict[str, torch.Tensor],
+    person_idx: int,
+    num_persons: int,
+) -> Dict[str, np.ndarray]:
+    """If multi-person, select `person_idx`; all arrays float32 numpy for np.savez."""
+    out: Dict[str, np.ndarray] = {}
+    for key, val in smpl_params_canonical.items():
+        if val is None:
+            continue
+        t = val.detach().cpu()
+        if num_persons > 1:
+            t = t[person_idx]
+        out[key] = t.float().numpy().astype(np.float32)
+    return out
+
+
+def _betas_np_from_smoothed(
+    smpl_smooth: Dict[str, torch.Tensor],
+    T_canonical: int,
+) -> np.ndarray:
+    """Build (T, 10) float32 betas for canonical NPZ from smoothed incam tensors."""
+    b = smpl_smooth.get("betas")
+    if b is None:
+        return np.zeros((T_canonical, 10), dtype=np.float32)
+    t = b.detach().cpu().float()
+    if t.ndim == 1:
+        if t.numel() != 10:
+            raise ValueError(f"Expected betas (10,), got {tuple(t.shape)}")
+        row = t.numpy().astype(np.float32)
+        return np.tile(row[None, :], (T_canonical, 1))
+    if t.ndim != 2 or t.shape[1] != 10:
+        raise ValueError(f"Expected betas (T,10), got {tuple(t.shape)}")
+    arr = t.numpy().astype(np.float32)
+    if arr.shape[0] == T_canonical:
+        return arr
+    if arr.shape[0] > T_canonical:
+        return arr[:T_canonical]
+    pad = np.tile(arr[-1:], (T_canonical - arr.shape[0], 1))
+    return np.concatenate([arr, pad], axis=0)
+
+
+def _smooth_smpl_for_one_person(
+    person_smpl_params: Dict[str, torch.Tensor],
+    frame_mask: Optional[torch.Tensor],
+    smooth_window: int,
+    echo_module,
+) -> Dict[str, torch.Tensor]:
+    seq_len = person_smpl_params["global_orient"].shape[0]
+    if frame_mask is None:
+        missing_groups: List[List[int]] = []
+    else:
+        mask = frame_mask[:seq_len].bool()
+        missing_frame_ids = torch.where(~mask)[0]
+        missing_groups = _group_consecutive_frame_ids(missing_frame_ids)
+
+    betas = person_smpl_params.get("betas")
+    smpl_dict = {
+        "global_orient": person_smpl_params["global_orient"],
+        "body_pose": person_smpl_params["body_pose"],
+        "transl": person_smpl_params["transl"],
+        "betas": betas if betas is not None else None,
+    }
+    smpl_6d = echo_module.smpl_dict_to_rot6d(smpl_dict)
+    if missing_groups:
+        smpl_6d = echo_module.linear_interpolate_frame_ids(smpl_6d, missing_groups)
+    if smooth_window > 0:
+        smpl_6d = echo_module.smooth_motion_rep(smpl_6d, kernel_size=smooth_window, sigma=1.0)
+    return echo_module.rot6d_to_smpl_dict(smpl_6d)
+
+
+def _resolve_manifest_link(args: argparse.Namespace) -> str:
+    """Default for JSON `link` when a row has no stored link."""
+    if getattr(args, "link", None) is not None:
+        return str(args.link)
+    return str(getattr(args, "default_link", "") or "")
+
+
+def run(args: argparse.Namespace) -> None:
+    if args.id_width < 1:
+        raise ValueError("--id_width must be >= 1")
+
+    wr = str(getattr(args, "weight_root", "") or "").strip()
+    if wr:
+        os.environ["VIDEO2SMPL_WEIGHT_ROOT"] = str(Path(wr).expanduser().resolve())
+    else:
+        os.environ["VIDEO2SMPL_WEIGHT_ROOT"] = ""
+
+    manifest_source = str(args.source).strip()
+    if not manifest_source:
+        raise ValueError('--source is required and must be a non-empty string (dataset / provenance label for manifest JSON)')
+
+    work_root = Path(args.root_dir).resolve()
+    manifest_link = _resolve_manifest_link(args)
+    out_trainable = work_root / "processed_trainable_data"
+    from pipeline.dataset_schema import SMPL_CANONICAL_FILENAME, sample_paths
+    from pipeline.manifest import (
+        build_video2smpl_row,
+        load_manifest_list,
+        manifest_path,
+        resolve_video_abs,
+        resolve_video_rel,
+        save_manifest,
+        smpl_filled,
+        try_load_legacy_manifest,
+    )
+
+    out_manifest = manifest_path(work_root, args.manifest_name)
+
+    if not out_manifest.exists():
+        raise FileNotFoundError(
+            f"Manifest not found: {out_manifest}. Run the select stage first "
+            f"(e.g. python run.py --root_dir {work_root} --source <label> --from-stage select)."
+        )
+
+    _setup_vendor_imports(Path(args.vendor_root))
+
+    # Reuse EchoMotion pipeline pieces directly.
+    from extract_motion import MotionExtractor  # type: ignore
+    from scripts.data_processors.motion_alignment.retarget_mogen_db import (  # type: ignore
+        smooth_motion_rep,
+        smpl_dict_to_rot6d,
+        rot6d_to_smpl_dict,
+    )
+    from scripts.data_processors.motion_alignment.seq_utils import linear_interpolate_frame_ids  # type: ignore
+
+    class EchoModule:
+        pass
+
+    EchoModule.smooth_motion_rep = staticmethod(smooth_motion_rep)
+    EchoModule.smpl_dict_to_rot6d = staticmethod(smpl_dict_to_rot6d)
+    EchoModule.rot6d_to_smpl_dict = staticmethod(rot6d_to_smpl_dict)
+    EchoModule.linear_interpolate_frame_ids = staticmethod(linear_interpolate_frame_ids)
+
+    mapping_path = work_root / args.mapping_name
+    id_mapping: List[Dict[str, str]] = _load_id_mapping(mapping_path)
+    path_to_sample: Dict[str, str] = {}
+    for item in id_mapping:
+        rel = item.get("original_path_relative")
+        sid = item.get("sample_id")
+        if rel and sid:
+            path_to_sample[rel] = sid
+
+    max_id = 0
+    for item in id_mapping:
+        n = _parse_sample_id_numeric(item.get("sample_id", ""))
+        if n is not None:
+            max_id = max(max_id, n)
+    max_id = max(max_id, _max_sample_id_from_dirs([out_trainable], args.id_width))
+
+    manifest_list = load_manifest_list(out_manifest)
+    if not manifest_list:
+        legacy = try_load_legacy_manifest(work_root, args.manifest_name)
+        if legacy:
+            manifest_list = legacy
+        else:
+            raise ValueError(f"Manifest is empty: {out_manifest}. Run the select stage first.")
+
+    prev_manifest = {str(r["sample_id"]): r for r in manifest_list if r.get("sample_id")}
+
+    extractor = MotionExtractor(
+        device=torch.device(args.device) if args.device else None,
+        max_frames=args.max_frames,
+        batch_size=args.batch_size,
+        use_shape=args.use_shape,
+        overwrite=args.overwrite,
+    )
+
+    processed_this_run = 0
+    skipped = 0
+    errors = 0
+
+    work_items = sorted(
+        manifest_list,
+        key=lambda r: int(r["sample_id"]) if str(r.get("sample_id", "")).isdigit() else 0,
+    )
+
+    for row in work_items:
+        sample_id = str(row["sample_id"])
+        video_rel = resolve_video_rel(row)
+        if not video_rel:
+            print(f"WARN: skip {sample_id}: missing video_path (run select first)")
+            errors += 1
+            continue
+
+        if smpl_filled(row) and not args.overwrite:
+            skipped += 1
+            continue
+
+        try:
+            video_path = resolve_video_abs(work_root, row)
+        except ValueError as e:
+            print(f"WARN: skip {sample_id}: {e}")
+            errors += 1
+            continue
+
+        if not video_path.is_file():
+            print(f"WARN: skip {sample_id}: video not found: {video_path}")
+            errors += 1
+            continue
+
+        rel = video_rel
+        if rel not in path_to_sample:
+            map_row = {
+                "sample_id": sample_id,
+                "seq_index": "",
+                "original_filename": row.get("original_video") or video_path.name,
+                "original_stem": video_path.stem,
+                "original_path_relative": rel,
+                "output_sample_dir": sample_id,
+            }
+            id_mapping.append(map_row)
+            path_to_sample[rel] = sample_id
+
+        sample_train = out_trainable / sample_id
+        sample_train.mkdir(parents=True, exist_ok=True)
+        smpl_canonical_npz_path = sample_train / SMPL_CANONICAL_FILENAME
+
+        with tempfile.TemporaryDirectory(prefix="v2smpl_") as tmp:
+            bbox_path = Path(tmp) / "bbox.pt"
+            bbx_xyxy, conf, frame_mask = extractor.extract_bbox(
+                video_path=str(video_path),
+                output_path=None,
+                overwrite=args.overwrite,
+            )
+            torch.save(
+                {
+                    "bbx_xyxy": bbx_xyxy.detach().cpu(),
+                    "bbx_conf": conf.detach().cpu(),
+                    "frame_mask": frame_mask.detach().cpu(),
+                },
+                bbox_path,
+            )
+            smpl_data = extractor.extract_smpl(
+                video_path=str(video_path),
+                bbox_path=str(bbox_path),
+                output_path=None,
+                overwrite=args.overwrite,
+            )
+            post_res = extractor.post_process(
+                smpl_data=smpl_data,
+                smooth_window=args.smooth_window,
+                set_floor=args.set_floor,
+                frame_mask=frame_mask,
+                use_shape=args.use_shape,
+            )
+
+            person_idx = args.person_idx
+            num_persons = int(smpl_data["smpl_params_incam"]["global_orient"].shape[0])
+            smpl_incam = {
+                k: v[person_idx].detach().cpu() for k, v in smpl_data["smpl_params_incam"].items()
+            }
+            smpl_smooth = _smooth_smpl_for_one_person(
+                person_smpl_params=smpl_incam,
+                frame_mask=frame_mask.detach().cpu(),
+                smooth_window=args.smooth_window,
+                echo_module=EchoModule,
+            )
+
+            canon_np = _canonical_smpl_to_npz_dict(
+                post_res["smpl_params_canonical"], person_idx, num_persons
+            )
+            T_canon = int(canon_np["global_orient"].shape[0])
+            canon_np["betas"] = _betas_np_from_smoothed(smpl_smooth, T_canon)
+            np.savez(
+                smpl_canonical_npz_path,
+                **canon_np,
+                intrinsic=smpl_data["intrinsic"].detach().cpu().numpy(),
+                frame_mask=frame_mask.detach().cpu().numpy(),
+                bbox_xyxy=bbx_xyxy.detach().cpu().numpy(),
+                bbox_conf=conf.detach().cpu().numpy(),
+                set_floor=np.array([int(args.set_floor)], dtype=np.int32),
+                coord_note=np.bytes_("canonical_dart_smpl_axis_angle"),
+            )
+
+        paths = sample_paths(sample_id, video_path.name)
+        first_frame = sample_train / "first_frame.jpg"
+        _extract_first_frame(video_path, first_frame)
+
+        old = prev_manifest.get(sample_id, row)
+        link_val = old.get("link")
+        if link_val is None or str(link_val).strip() == "":
+            link_val = manifest_link
+        prev_manifest[sample_id] = build_video2smpl_row(
+            sample_id=sample_id,
+            original_video=str(row.get("original_video") or video_path.name),
+            video_rel=paths["video_path"],
+            first_frame_rel=paths["first_frame"],
+            smpl_rel=paths["smpl_path"],
+            source=manifest_source,
+            link=str(link_val),
+            old_row=old,
+        )
+        processed_this_run += 1
+
+    id_mapping.sort(key=lambda it: int(it["sample_id"]) if it.get("sample_id", "").isdigit() else 0)
+    for i, item in enumerate(id_mapping, start=1):
+        item["seq_index"] = str(i)
+
+    manifest_out = sorted(
+        prev_manifest.values(),
+        key=lambda r: int(r["sample_id"]) if str(r.get("sample_id", "")).isdigit() else 0,
+    )
+    save_manifest(out_manifest, manifest_out)
+
+    with open(mapping_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "root_dir": str(work_root),
+                "id_width": args.id_width,
+                "count": len(id_mapping),
+                "items": id_mapping,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    print(f"Done. Total samples in mapping: {len(id_mapping)}")
+    print(
+        f"Processed this run: {processed_this_run}, "
+        f"skipped (smpl already done): {skipped}, errors/warn: {errors}"
+    )
+    print(f'Manifest "source" label: {manifest_source}')
+    print(f"Manifest written to: {out_manifest}")
+    print(f"ID mapping written to: {mapping_path}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Video2SMPL sub-stage (steps 1-4); updates unified dataset_manifest.json in place"
+    )
+    parser.add_argument("--root_dir", type=str, default="examples/training")
+    parser.add_argument(
+        "--weight_root",
+        type=str,
+        default="/data1/wjh/Video2SMPL",
+        help="CameraHMR / SMPL / YOLO / Detectron 等权重所在目录（扁平放置）。传空字符串 \"\" 则仅用仓库内 third_party/.../data/",
+    )
+    parser.add_argument("--vendor_root", type=str, default="third_party")
+    parser.add_argument(
+        "--manifest_name",
+        type=str,
+        default="dataset_manifest.json",
+        help="Single manifest under root_dir; updated in place across pipeline stages.",
+    )
+    parser.add_argument(
+        "--mapping_name",
+        type=str,
+        default="sample_id_to_source.json",
+        help="JSON file under root_dir: seq id <-> original video filename/path",
+    )
+    parser.add_argument(
+        "--id_width",
+        type=int,
+        default=6,
+        help="Zero-pad width for sample folders (e.g. 6 -> 000001)",
+    )
+
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Re-run videos that are already in the mapping (reuse the same sample_id). New videos always append after the current max id.",
+    )
+    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--max_frames", type=int, default=500, help="Maximum number of frames to process per video")
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--person_idx", type=int, default=0)
+    parser.add_argument("--smooth_window", type=int, default=5)
+    parser.add_argument(
+        "--set-floor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Canonical DART 贴地（默认开启，适合站立/行走/地面操作等机器人常用动作）。使用 --no-set-floor 关闭。",
+    )
+    parser.add_argument("--use_shape", action="store_true")
+
+    parser.add_argument(
+        "--source",
+        type=str,
+        required=True,
+        help='Required. Non-empty string written to every manifest row as field "source" (dataset or provenance label).',
+    )
+    parser.add_argument(
+        "--link",
+        type=str,
+        default=None,
+        help='Manifest field "link". Default: empty, or preserved from existing manifest.',
+    )
+    parser.add_argument(
+        "--default_link",
+        type=str,
+        default="",
+        help="Default link for new manifest rows when previous manifest has no link.",
+    )
+    return parser
+
+
+if __name__ == "__main__":
+    run(build_parser().parse_args())

@@ -1,31 +1,15 @@
 examples/training/
-├── CameraHMR_smpl_results/           # raw HMR results
-└── CameraHMR_smpl_results_overlay/   # raw HMR re-projection results for sanity check
-└── CameraHMR_smpl_results_smoothed/  # smoothed HMR results
-└── rgb_videos/      
-└── processed_trainable_data /
+└── processed_trainable_data/
+    └── <000001>/
+        ├── your_source_name.mp4      # select 从 --select-input-dir 移入
+        ├── first_frame.jpg
+        └── smpl_canonical.npz        # 唯一大文件产物（canonical SMPL）
 
-
-CameraHMR_smpl_results/<000001>/smpl_raw.pt（目录名为递增序号，见 `sample_id_to_source.json`）
-
-这是直接从 extract_smpl 保存的原始结果，包含：
-    smpl_params_incam（含 global_orient/body_pose/transl/betas）
-    focal_length、width、height
-    intrinsic
-    cam_t
-    verts、joints、fps 等
-
-CameraHMR_smpl_results_smoothed/<000001>/smpls_canonical_group.npz
-
-    canonical（DART）系下、与 manifest 中 smpl_path 对应的 SMPL 参数，轴角制：
-    global_orient (T,3)、body_pose (T,69)、transl (T,3)、betas（按帧或共享形状）
+`smpl_canonical.npz` 内容（与下游训练一致）：
+    global_orient (T,3)、body_pose (T,69)、transl (T,3)、betas
     另附 intrinsic、frame_mask、bbox_xyxy、bbox_conf、set_floor、coord_note
 
-CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
-
-    相机系（incam）下经平滑的 SMPL，供对照与相机索引；manifest 字段 smpl_incam_smooth_path
-    global_orient/body_pose/transl/betas（旋转矩阵存储，与 CameraHMR 输出一致）
-    intrinsic、frame_mask、bbox_xyxy、bbox_conf、set_floor
+默认**不保存** raw HMR（`smpl_raw.pt`）、incam 平滑 npz、`motion_postprocess.pt`；中间结果仅在临时目录计算。
 
 
 
@@ -35,38 +19,52 @@ CameraHMR_smpl_results_smoothed/<000001>/smpls_smoothed_group.npz
 2.camerahmr 回归global_orient/body_pose/betas/transl 并且可以输出verts/joints,保留相机信息（echomotion）
 3.后处理echomotion的办法对序列做插值和时序平滑（echomotion）
 4.用 process_hmr_motion 做 canonicalization/坐标系变换/地面对齐（set_floor=True）（echomotion）
-第4步结束后组织成json格式，text字段暂时留空（comovi）
-[
-  {
-    "sample_id": "000001",
-    "original_video": "your_source_name.mp4",
-    "rgb_path": "processed_trainable_data/000001/rgb.mp4",
-    "first_frame": "processed_trainable_data/000001/first_frame.jpg",
-    "smpl_path": "CameraHMR_smpl_results_smoothed/000001/smpls_canonical_group.npz",
-    "smpl_incam_smooth_path": "CameraHMR_smpl_results_smoothed/000001/smpls_smoothed_group.npz",
-    "text": "",
-    "type": "video",
-    "source": "your_dataset_or_batch_label",
-    "link": "optional_url_or_empty"
-  }
-]
+第 4 步起写入**同一份**渐进式 manifest（默认 `dataset_manifest.json`），各阶段在原文件上增补字段，不再每步新建 `train_stage4/5_*.json`。
+
+单条样本示例（字段随阶段逐步填满）：
+
+```json
+{
+  "sample_id": "000001",
+  "original_video": "your_source_name.mp4",
+  "video_path": "processed_trainable_data/000001/dance_01.mp4",
+  "rgb_path": "processed_trainable_data/000001/dance_01.mp4",
+  "first_frame": "processed_trainable_data/000001/first_frame.jpg",
+  "caption": "A person walks forward across the room.",
+  "action_caption": "walking forward",
+  "smpl_path": "processed_trainable_data/000001/smpl_canonical.npz",
+  "select_status": "",
+  "type": "video",
+  "source": "your_dataset_or_batch_label",
+  "link": "",
+  "stages_completed": ["video2smpl", "captions"],
+  "text": "A person walks forward across the room."
+}
+```
+
+| 阶段 | 写入字段 |
+|------|----------|
+| select | `video_path`, `rgb_path`, `select_status`, …（视频移入 `processed_trainable_data/<id>/`） |
+| captions | `caption`, `action_caption` |
+| video2smpl | `first_frame`, `smpl_path`（仅 canonical npz） |
+
+`text` 为兼容旧下游保留，与 `caption` 同步。
 5.调用大模型打标（本仓库脚本）（comovi）
 
 依赖（可与 SMPL 环境分开装）：`pip install openai pillow httpx`；并设置 `OPENAI_API_KEY` 或 `OPENROUTER_API_KEY`（与脚本内 OpenRouter 默认 `base_url` 一致时可配 `OPENAI_BASE_URL`）。
 
-在 **`run_pipeline` 的 `--root_dir`** 下，已生成 `train_stage4_empty_text.json` 后，从每条样本的 `rgb_path`（`processed_trainable_data/<id>/rgb.mp4`）均匀抽帧，调用多模态 API，把描述写入 **`text`**，默认输出到同目录 **`train_stage5_with_text.json`**（结构与原 manifest 相同，仅 `text` 从空变有）。`generate_sequence_captions.py` **仅用于本 pipeline**，`--manifest` 与 `--pipeline-root` 为必填参数。
+在 **`--root_dir`** 下已有 `dataset_manifest.json`（且含 `video_path` 或 `rgb_path`）后，打标阶段从视频均匀抽帧，**原地**更新同文件中的 **`caption`**（1–2 句）与 **`action_caption`**（动作短语）。`generate_sequence_captions.py` 默认 `--output-manifest` 与 `--manifest` 相同（in-place）。
 
 ```bash
 cd /path/to/Video2SMPL_Pipeline
 # 只检查路径与抽帧（不调 API）
 python generate_sequence_captions.py --dry-run \
-  --manifest examples/training/train_stage4_empty_text.json \
+  --manifest examples/training/dataset_manifest.json \
   --pipeline-root examples/training
 
 python generate_sequence_captions.py \
-  --manifest examples/training/train_stage4_empty_text.json \
+  --manifest examples/training/dataset_manifest.json \
   --pipeline-root examples/training \
-  --output-manifest examples/training/train_stage5_with_text.json \
   --model openai/gpt-4o \
   --num-frames 12 \
   --caption-lang en \
@@ -76,20 +74,20 @@ python generate_sequence_captions.py \
 说明：
 
 - `--workers`：并行请求数，**默认 4**；显式写 `--workers 1` 则退化为完全串行。若出现 **429 / rate limit**，把并发调小或略增大 `--sleep`。
-- `--resume`：已写入过非空 `text` 的 `sample_id` 会跳过；中断后重跑可接着补全（需固定 `--output-manifest` 与首次一致）。
-- 若本机已装 **OpenCV**（`requirements.txt` 中已含），优先从 `rgb.mp4` 抽多帧；否则仅能用 `first_frame` 单图，建议安装 `opencv-python`。
-- 也可把 `--output-manifest` 指回 `train_stage4_empty_text.json` 覆盖原文件（不推荐，易与 stage4 混淆）。
+- 已同时填好 `caption` 与 `action_caption` 的样本会跳过；`--force-recaption` 可强制重打。
+- 若本机已装 **OpenCV**，优先从 `video_path` / `rgb_path` 抽多帧；否则 fallback `first_frame`。
+- 旧 manifest（`train_stage4/5_*.json`、`text` 字段）首次加载会自动迁移到 `caption`。
 
 6.组织成json格式（打标后 `text` 已写在输出 manifest 各条中，可直接用于训练/下游）（comovi）
 [
   {
     "sample_id": "000001",
     "original_video": "your_source_name.mp4",
-    "rgb_path": "processed_trainable_data/000001/rgb.mp4",
+    "rgb_path": "processed_trainable_data/000001/your_source_name.mp4",
     "first_frame": "processed_trainable_data/000001/first_frame.jpg",
-    "smpl_path": "CameraHMR_smpl_results_smoothed/000001/smpls_canonical_group.npz",
-    "smpl_incam_smooth_path": "CameraHMR_smpl_results_smoothed/000001/smpls_smoothed_group.npz",
-    "text": "A person performs a smooth yoga transition from plank to downward dog.",
+    "smpl_path": "processed_trainable_data/000001/smpl_canonical.npz",
+    "caption": "A person performs a smooth yoga transition from plank to downward dog.",
+    "action_caption": "yoga transition to downward dog",
     "type": "video",
     "source": "your_dataset_or_batch_label",
     "link": "optional_url_or_empty"
@@ -101,7 +99,47 @@ python generate_sequence_captions.py \
 
 ---
 
-已实现脚本：`pipeline/run_pipeline.py`
+## Pipeline 架构（多子阶段）
+
+顶层编排入口（推荐）：
+
+- `run.py`：按顺序执行一个或多个子阶段，支持 `--stages` 与 `--from-stage`
+
+子阶段目录：
+
+| 阶段名 | 路径 | 说明 |
+|--------|------|------|
+| `video2smpl` | `pipeline/stages/video2smpl/` | 视频 → SMPL（原 steps 1–4 + stage4 manifest） |
+| `captions` | `pipeline/stages/captions/` | 大模型打标（封装 `generate_sequence_captions.py`） |
+| `external_smpl` | `pipeline/stages/external_smpl/` | 外来 SMPL 对齐（独立链路） |
+
+向后兼容（仍可用）：
+
+- `pipeline/run_pipeline.py` → 等价于只跑 `video2smpl`
+- `pipeline/process_external_smpl.py` → 等价于只跑 `external_smpl`
+
+```bash
+# 列出阶段与固定顺序
+python run.py --list-stages
+
+# 全流程（固定顺序：select -> captions -> video2smpl）
+python run.py --root_dir examples/training --source my_dataset
+
+# 从打标开始（跳过 select；manifest 需已有 video_path）
+python run.py --root_dir examples/training --source my_dataset --from-stage captions
+
+# 仅 SMPL（manifest 需已有 video_path，caption 可选）
+python run.py --root_dir examples/training --source my_dataset --from-stage video2smpl
+
+# 仅注册视频路径（select passthrough）
+python run.py --root_dir examples/training --source my_dataset --from-stage select
+```
+
+`--stages` 若指定多个阶段，会**自动按** `select,captions,video2smpl` **排序**，不会按书写顺序执行。
+
+---
+
+已实现脚本：`pipeline/stages/video2smpl/run.py`（兼容入口：`pipeline/run_pipeline.py`）
 
 用途：
 - 复用 EchoMotion 的 1~4 步核心能力：
@@ -154,7 +192,7 @@ ffmpeg -version
 ```
 
 运行前准备：
-- `examples/training/rgb_videos/` 下放待处理视频（支持 `mp4/mov/avi/mkv`）
+- select 用 `--select-input-dir` 指定待入库视频目录（支持 `mp4/mov/avi/mkv`，递归扫描）；每条移入 `processed_trainable_data/<id>/`
 - 输出目录名使用**递增序号**（默认 6 位零填充：`000001`、`000002`…），与原始文件名无关；排序按**文件名字典序**稳定遍历
 - 映射表：`examples/training/sample_id_to_source.json`（序号 ↔ 原始路径/文件名），打标或合并数据时用该文件回溯
 - 本仓库已内置依赖代码到 `third_party/`（无需再依赖外部 EchoMotion/CoMoVi 仓库）
@@ -212,7 +250,17 @@ PY
 
 运行示例：
 ```bash
-cd /root/projects/Video2SMPL
+cd /path/to/Video2SMPL_Pipeline
+# 推荐：顶层编排
+python run.py \
+  --root_dir examples/training \
+  --source "test" \
+  --stages video2smpl \
+  --vendor_root third_party \
+  --smooth_window 5 \
+  --id_width 6
+
+# 或沿用旧入口
 python pipeline/run_pipeline.py \
   --root_dir examples/training \
   --source "test" \
@@ -231,23 +279,14 @@ python pipeline/run_pipeline.py \
 - `--id_width`：序号零填充位数，**默认 6**（`000001` …）
 - `--max_frames`：每个视频最多处理多少帧，**默认 500**
 - `--mapping_name`：映射文件名，默认 `sample_id_to_source.json`
-- **追加模式（默认）**：若 `sample_id_to_source.json` 已存在，已登记过的 `rgb_videos` 下相对路径会**跳过**；仅对新视频从「当前最大 sample 编号 + 1」继续编号
+- **追加模式（默认）**：若 `sample_id_to_source.json` 已存在，已登记过的源路径（`original_path_relative`）会**跳过**；仅对新视频从「当前最大 sample 编号 + 1」继续编号
 - `--overwrite`：对**已在映射中的**视频强制重跑，**沿用原 sample_id** 覆盖输出；新视频仍走追加编号
 - 重建 `train_stage4_empty_text.json` 时会按映射合并全量条目，并尽量**保留**已有条目的 `text`；`source` 始终为本次运行的 `--source`；`link` 若旧条目非空则保留，否则用本次 `--link` / `--default_link`
 - 请勿随意删除 `sample_id_to_source.json`：否则无法识别「旧视频对应哪个序号」，新跑可能给同一批视频分配新的编号（与已有目录重复风险）；备份该文件即可安全追加
 
 输出：
-- `examples/training/CameraHMR_smpl_results/<000001>/`
-  - `bbox.pt`
-  - `smpl_raw.pt`
-- `examples/training/CameraHMR_smpl_results_smoothed/<000001>/`
-  - `motion_postprocess.pt`（含 `smpl_params_canonical`）
-  - `smpls_canonical_group.npz`
-  - `smpls_smoothed_group.npz`
-- `examples/training/processed_trainable_data/<000001>/`
-  - `rgb.mp4`
-  - `first_frame.jpg`
+- `processed_trainable_data/<000001>/` — 视频 + `first_frame.jpg` + `smpl_canonical.npz`
 - `examples/training/sample_id_to_source.json`
   - `items[]`：`sample_id`、`seq_index`、`original_filename`、`original_stem`、`original_path_relative`、`output_sample_dir`
-- `examples/training/train_stage4_empty_text.json`
-  - 额外字段：`sample_id`、`original_video`；以及 `rgb_path` / `first_frame` / `smpl_path`（canonical npz）/ `smpl_incam_smooth_path` / `text=""` / `type` / `source` / `link`
+- `examples/training/dataset_manifest.json`
+  - 全 pipeline 共用；含 `video_path`、`caption`、`action_caption`、`smpl_path` 等，随阶段逐步完善

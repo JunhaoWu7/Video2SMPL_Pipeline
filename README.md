@@ -1,7 +1,31 @@
-# pipeline介绍
+# pipeline 介绍
 
-### 1.video2smpl，查看Video2SMPL_Readme.md
-### 2.外部smpl处理,查看process_external_smpl_README.md
+顶层入口：`run.py`（多子阶段编排，`--stages` / `--from-stage`）
+
+| 子阶段 | 文档 |
+|--------|------|
+| video2smpl（视频→SMPL） | [Video2SMPL_Readme.md](Video2SMPL_Readme.md) |
+| captions（大模型打标） | 见 Video2SMPL_Readme.md 第 5 步 |
+| external_smpl（外来 SMPL） | [process_external_smpl_README.md](process_external_smpl_README.md) |
+
+```bash
+# Hub：/data1/wjh/HumanRetarget/<dataset>/（各子目录结构相同）
+python run.py --init-dataset humanvid
+python run.py --list-datasets
+python run.py --dataset humanvid --select-input-dir /path/to/raw_videos
+
+# 开发单目录
+python run.py --root_dir examples/training --source my_data
+```
+
+旧入口仍可用：`pipeline/run_pipeline.py`、`pipeline/process_external_smpl.py`
+
+**统一数据结构**（多数据集处理后相同目录 + manifest）：见 [DATA_LAYOUT.md](DATA_LAYOUT.md)
+
+```bash
+# 从 dataset_manifest.json 导出训练用 splits（不含 embedding）
+python export_train_splits.py --root-dir examples/training
+```
 
 # Video2SMPL 权重放置说明
 
