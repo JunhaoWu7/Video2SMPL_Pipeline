@@ -61,6 +61,7 @@ STAGE_FIELDS: Dict[str, tuple[str, ...]] = {
         "rgb_path",
         "first_frame",
         "smpl_path",
+        "smpl_backend",
     ),
 }
 
@@ -78,6 +79,7 @@ PRESERVE_KEYS = frozenset(
         "link",
         "stages_completed",
         "action_label",  # reserved alias
+        "smpl_backend",
     }
 )
 
@@ -186,6 +188,25 @@ def smpl_filled(row: Mapping[str, Any]) -> bool:
     return bool(_nonempty_str(row.get("smpl_path")))
 
 
+def smpl_filled_for_backend(row: Mapping[str, Any], backend: str) -> bool:
+    """True if ``smpl_path`` exists and ``smpl_backend`` matches (or is unset)."""
+    if not smpl_filled(row):
+        return False
+    existing = _nonempty_str(row.get("smpl_backend"))
+    if not existing:
+        return True
+    return existing == _nonempty_str(backend)
+
+
+def get_hmr_text_prompt(row: Mapping[str, Any]) -> str:
+    """Language prompt for PromptHMR (action phrase + scene context)."""
+    action = get_action_caption(row)
+    scene = get_caption(row)
+    if action and scene:
+        return f"{action}. {scene}"
+    return action or scene
+
+
 def rows_caption_complete(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
     """Samples with all caption-stage fields filled."""
     return [normalize_row(dict(r)) for r in rows if captions_filled(r)]
@@ -250,6 +271,7 @@ def normalize_row(row: MutableMapping[str, Any]) -> Dict[str, Any]:
     out.setdefault("rgb_path", "")
     out.setdefault("first_frame", "")
     out.setdefault("smpl_path", "")
+    out.setdefault("smpl_backend", "")
     out.setdefault("type", "video")
     # Drop deprecated debug / incam fields from exported rows.
     out.pop("smpl_incam_smooth_path", None)
@@ -346,6 +368,7 @@ def build_video2smpl_row(
     video_rel: str,
     first_frame_rel: str,
     smpl_rel: str,
+    smpl_backend: str,
     source: str,
     link: str,
     old_row: Optional[Mapping[str, Any]] = None,
@@ -362,6 +385,7 @@ def build_video2smpl_row(
     base["rgb_path"] = v
     base["first_frame"] = first_frame_rel
     base["smpl_path"] = smpl_rel
+    base["smpl_backend"] = _nonempty_str(smpl_backend)
     mark_stage_completed(base, STAGE_VIDEO2SMPL)
     return merge_preserved_fields(base, old_row)
 

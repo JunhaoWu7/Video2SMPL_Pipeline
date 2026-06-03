@@ -3,36 +3,77 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from pipeline.dataset_schema import (
+    DEFAULT_HMR_BACKEND,
+    HMR_BACKEND_CAMERAHMR,
+    HMR_BACKEND_PROMPTHMR,
+)
 from pipeline.stages.base import PipelineStage
+from pipeline.stages.video2smpl.common import normalize_hmr_backend
 
 
 class Video2SmplStage(PipelineStage):
     name = "video2smpl"
-    description = "Video -> SMPL for all caption-complete samples (required after captions)"
+    description = "Video -> SMPL (default: PromptHMR world; optional: CameraHMR DART)"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         group = parser.add_argument_group("video2smpl stage")
         group.add_argument(
+            "--hmr-backend",
+            type=str,
+            default=DEFAULT_HMR_BACKEND,
+            choices=[HMR_BACKEND_PROMPTHMR, HMR_BACKEND_CAMERAHMR],
+            help=f"HMR backend (default: {HMR_BACKEND_PROMPTHMR}).",
+        )
+        group.add_argument(
             "--weight_root",
             type=str,
             default="/data1/wjh/Video2SMPL",
-            help="CameraHMR / SMPL / YOLO weights root; empty string uses third_party/.../data/",
+            help="CameraHMR / SMPL / YOLO weights (camerahmr backend only).",
+        )
+        group.add_argument(
+            "--vendor_root",
+            type=str,
+            default="third_party",
+            help="third_party root for CameraHMR extract_motion (camerahmr only).",
+        )
+        group.add_argument(
+            "--prompthmr-vendor",
+            type=str,
+            default=None,
+            help="PromptHMR vendor_bundle directory (prompthmr backend).",
+        )
+        group.add_argument(
+            "--prompthmr-ckpt-root",
+            type=str,
+            default="/data1/wjh/ckpt/PromptHMR",
+            help="PromptHMR checkpoint root for preflight validation.",
+        )
+        group.add_argument(
+            "--static-camera",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="PromptHMR: assume fixed camera (default on).",
         )
         group.add_argument("--max_frames", type=int, default=500)
         group.add_argument("--batch_size", type=int, default=32)
         group.add_argument("--person_idx", type=int, default=0)
+        group.add_argument("--smooth_window", type=int, default=5)
         group.add_argument(
             "--set-floor",
             action=argparse.BooleanOptionalAction,
             default=True,
-            help="Canonical DART floor alignment (default on). Use --no-set-floor to disable.",
+            help="CameraHMR DART floor alignment (camerahmr only).",
         )
+        group.add_argument("--use_shape", action="store_true")
+
     def validate_args(self, args: argparse.Namespace) -> None:
         if not str(getattr(args, "source", "") or "").strip():
             raise ValueError('--source is required when running the "video2smpl" stage.')
 
+        backend = normalize_hmr_backend(getattr(args, "hmr_backend", DEFAULT_HMR_BACKEND))
+
         from pipeline.manifest import (
-            captions_filled,
             load_manifest_list,
             manifest_path,
             resolve_video_rel,
@@ -44,17 +85,14 @@ class Video2SmplStage(PipelineStage):
         mpath = manifest_path(root, getattr(args, "manifest_name", None))
         if not mpath.exists():
             raise ValueError(
-                f"Manifest not found: {mpath}. Run the select stage first (--from-stage select), "
-                "or ensure dataset_manifest.json exists with video_path per sample."
+                f"Manifest not found: {mpath}. Run the select stage first."
             )
         rows = load_manifest_list(mpath)
         if not rows:
             raise ValueError(f"Manifest is empty: {mpath}")
         if not rows_caption_complete(rows):
             raise ValueError(
-                f"No caption-complete samples in {mpath}. "
-                "Run the captions stage before video2smpl (caption, action_caption, "
-                "robot_learnable, skill_category)."
+                f"No caption-complete samples in {mpath}. Run captions before video2smpl."
             )
         missing_video = [
             str(r.get("sample_id", "?"))
@@ -63,9 +101,25 @@ class Video2SmplStage(PipelineStage):
         ]
         if missing_video:
             raise ValueError(
-                f"{len(missing_video)} caption-complete sample(s) lack video_path "
-                f"(e.g. {missing_video[:3]}). Run select first."
+                f"{len(missing_video)} caption-complete sample(s) lack video_path."
             )
+
+        if backend == HMR_BACKEND_PROMPTHMR:
+            from pipeline.stages.video2smpl.prompthmr_weights import check_weights
+
+            require_slam = not bool(getattr(args, "static_camera", True))
+            ok, missing = check_weights(
+                getattr(args, "prompthmr_vendor", None),
+                getattr(args, "prompthmr_ckpt_root", None),
+                require_slam=require_slam,
+            )
+            if not ok:
+                raise FileNotFoundError(
+                    "PromptHMR vendor/weights not ready:\n"
+                    + "\n".join(missing)
+                    + "\nRun: bash scripts/copy_prompthmr_vendor.sh"
+                )
+
         pending = rows_pending_smpl(rows)
         if not pending and not getattr(args, "overwrite", False):
             print(

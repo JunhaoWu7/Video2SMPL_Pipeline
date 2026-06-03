@@ -28,8 +28,16 @@ SPLITS_DIR = "splits"
 DIR_PROCESSED = "processed_trainable_data"
 SPLITS_DIR_NAME = SPLITS_DIR
 
-SMPL_CANONICAL_FILENAME = "smpl_canonical.npz"
+SMPL_CAMERAHMR_FILENAME = "smpl_canonical.npz"
+SMPL_PROMPTHMR_FILENAME = "smpl_prompthmr.npz"
+# Backward-compatible alias
+SMPL_CANONICAL_FILENAME = SMPL_CAMERAHMR_FILENAME
 FIRST_FRAME_FILENAME = "first_frame.jpg"
+
+HMR_BACKEND_PROMPTHMR = "prompthmr"
+HMR_BACKEND_CAMERAHMR = "camerahmr"
+VALID_HMR_BACKENDS = frozenset({HMR_BACKEND_PROMPTHMR, HMR_BACKEND_CAMERAHMR})
+DEFAULT_HMR_BACKEND = HMR_BACKEND_PROMPTHMR
 
 STANDARD_DATASET_DIRS: tuple[str, ...] = (
     DIR_PROCESSED,
@@ -43,6 +51,7 @@ CANONICAL_ROW_KEYS: tuple[str, ...] = (
     "rgb_path",
     "first_frame",
     "smpl_path",
+    "smpl_backend",
     "caption",
     "action_caption",
     "robot_learnable",
@@ -83,15 +92,33 @@ def sample_video_rel(sample_id: str, video_filename: str) -> str:
     return f"{sample_dir_rel(sample_id)}/{name}"
 
 
-def sample_paths(sample_id: str, video_filename: str) -> Dict[str, str]:
+def smpl_filename_for_backend(backend: str) -> str:
+    b = (backend or DEFAULT_HMR_BACKEND).strip().lower()
+    if b == HMR_BACKEND_CAMERAHMR:
+        return SMPL_CAMERAHMR_FILENAME
+    if b == HMR_BACKEND_PROMPTHMR:
+        return SMPL_PROMPTHMR_FILENAME
+    raise ValueError(
+        f"Unknown hmr backend {backend!r}; expected {HMR_BACKEND_PROMPTHMR!r} or {HMR_BACKEND_CAMERAHMR!r}"
+    )
+
+
+def sample_paths(
+    sample_id: str,
+    video_filename: str,
+    *,
+    hmr_backend: str = DEFAULT_HMR_BACKEND,
+) -> Dict[str, str]:
     """Standard relative paths for one sample (video co-located with SMPL / first_frame)."""
     base = sample_dir_rel(sample_id)
     v = sample_video_rel(sample_id, video_filename)
+    smpl_name = smpl_filename_for_backend(hmr_backend)
     return {
         "video_path": v,
         "rgb_path": v,
         "first_frame": f"{base}/{FIRST_FRAME_FILENAME}",
-        "smpl_path": f"{base}/{SMPL_CANONICAL_FILENAME}",
+        "smpl_path": f"{base}/{smpl_name}",
+        "smpl_backend": (hmr_backend or DEFAULT_HMR_BACKEND).strip().lower(),
     }
 
 
@@ -160,5 +187,6 @@ def layout_tree_text(root_name: str = "<root_dir>") -> str:
 └── {DIR_PROCESSED}/<sample_id>/
     ├── <video>.mp4               # one video per sample (select moves here)
     ├── {FIRST_FRAME_FILENAME}
-    └── {SMPL_CANONICAL_FILENAME}
+    ├── {SMPL_PROMPTHMR_FILENAME}   # default backend
+    └── {SMPL_CAMERAHMR_FILENAME}   # optional --hmr-backend camerahmr
 """

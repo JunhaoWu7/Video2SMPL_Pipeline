@@ -1,6 +1,6 @@
 # Video2SMPL Pipeline
 
-多阶段流水线：视频入库 → 大模型打标 → 视频转 canonical SMPL，统一写入 `dataset_manifest.json`。
+多阶段流水线：视频入库 → 大模型打标 → 视频转 SMPL（默认 **PromptHMR** 世界系，可选 **CameraHMR** DART），统一写入 `dataset_manifest.json`。
 
 **入口**：`run.py`
 
@@ -15,7 +15,9 @@ python run.py --dataset humanvid --select-input-dir /path/to/raw_videos
 
 # 从打标或 SMPL 续跑
 python run.py --dataset humanvid --from-stage captions
+# SMPL（默认 prompthmr；需先 bash scripts/copy_prompthmr_vendor.sh）
 python run.py --dataset humanvid --from-stage video2smpl
+python run.py --dataset humanvid --from-stage video2smpl --hmr-backend camerahmr
 
 # 单目录开发
 python run.py --root_dir examples/training --source my_data \
@@ -50,6 +52,7 @@ python run.py --root_dir examples/training --source my_data \
 | [doc/select.md](doc/select.md) | 视频入库 |
 | [doc/captions.md](doc/captions.md) | 打标 |
 | [doc/video2smpl.md](doc/video2smpl.md) | SMPL 提取 |
+| [doc/prompthmr_vendor.md](doc/prompthmr_vendor.md) | PromptHMR 内嵌代码与权重 |
 | [doc/external_smpl.md](doc/external_smpl.md) | 外来 SMPL 对齐 |
 
 ## 仓库结构
@@ -68,7 +71,7 @@ Video2SMPL_Pipeline/
 │       ├── select/
 │       ├── captions/
 │       ├── prune/
-│       ├── video2smpl/
+│       ├── video2smpl/             # backends + vendor_bundle/（PromptHMR 拷贝）
 │       ├── export_splits/
 │       └── external_smpl/
 └── third_party/                    # CameraHMR / EchoMotion  vendored
@@ -82,4 +85,10 @@ python run.py --dataset humanvid --from-stage export_splits
 python export_train_splits.py --root-dir /data1/wjh/HumanRetarget/humanvid
 ```
 
-安装与环境、权重见 [doc/video2smpl.md](doc/video2smpl.md) 与 [doc/weights.md](doc/weights.md)。
+**video2smpl**：默认 PromptHMR → `bash scripts/copy_prompthmr_vendor.sh`（代码进 `vendor_bundle/`，权重绝对路径 `/data1/wjh/ckpt/PromptHMR`）。CameraHMR 见 [doc/weights.md](doc/weights.md)。详见 [doc/video2smpl.md](doc/video2smpl.md)、[doc/prompthmr_vendor.md](doc/prompthmr_vendor.md)。
+
+
+
+
+
+

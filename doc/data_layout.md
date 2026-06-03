@@ -18,7 +18,8 @@
     └── 000001/
         ├── dance_01.mp4
         ├── first_frame.jpg
-        └── smpl_canonical.npz
+        ├── smpl_prompthmr.npz      # 默认 --hmr-backend prompthmr
+        └── smpl_canonical.npz      # 可选 --hmr-backend camerahmr
 ```
 
 ## Manifest 字段
@@ -28,7 +29,7 @@
 | select | `video_path`, `rgb_path`, `select_status`, `source`, … |
 | captions | `caption`, `action_caption`, `robot_learnable`, `skill_category` |
 | prune | 删除 `robot_learnable=false` 样本；保留行去掉 `robot_learnable` 字段 |
-| video2smpl | `first_frame`, `smpl_path`（剩余样本全部必须成功） |
+| video2smpl | `first_frame`, `smpl_path`, `smpl_backend`（`prompthmr` / `camerahmr`） |
 
 `skill_category` 取值（每条 clip **仅一类**）：`manipulation`、`locomotion`、`loco-manipulation`。
 
@@ -41,7 +42,8 @@
   "video_path": "processed_trainable_data/000001/dance_01.mp4",
   "rgb_path": "processed_trainable_data/000001/dance_01.mp4",
   "first_frame": "processed_trainable_data/000001/first_frame.jpg",
-  "smpl_path": "processed_trainable_data/000001/smpl_canonical.npz",
+  "smpl_path": "processed_trainable_data/000001/smpl_prompthmr.npz",
+  "smpl_backend": "prompthmr",
   "caption": "...",
   "action_caption": "...",
   "robot_learnable": true,
