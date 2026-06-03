@@ -41,7 +41,7 @@ try:
     from dataset.utils import load_motion
     from vis_motion.pyrender_checker import motion_vis_during_validation
 except Exception:
-    # Optional visualization deps are not required by pipeline/run_pipeline.py.
+    # Optional visualization deps are not required by run.py / video2smpl stage.
     load_motion = None
     motion_vis_during_validation = None
 

@@ -3,10 +3,12 @@ Unified pipeline manifest: one JSON list under ``root_dir`` that stages update i
 
 Intended stage flow (see project diagram):
   1. select       -> video_path, rgb_path (per-sample dir), select_status, ...
-  2. captions     -> caption, action_caption
-  3. video2smpl   -> first_frame, smpl_path (canonical npz only)
+  2. captions     -> caption, action_caption, robot_learnable, skill_category
+  3. prune        -> drop robot_learnable=false samples (+ on-disk dirs)
+  4. video2smpl   -> first_frame, smpl_path (canonical npz only)
+  5. export_splits -> splits/{manipulation,locomotion,loco-manipulation}.json (separate script)
 
-Legacy manifests (``train_stage4_empty_text.json``, ``text`` field) are normalized on load.
+Legacy manifests (``train_stage4_empty_text.json``) and old ``text`` fields are migrated to ``caption`` on load.
 """
 
 from __future__ import annotations
@@ -26,8 +28,19 @@ LEGACY_MANIFEST_NAMES = (
 
 STAGE_SELECT = "select"
 STAGE_CAPTIONS = "captions"
+STAGE_PRUNE = "prune"
 STAGE_VIDEO2SMPL = "video2smpl"
+STAGE_EXPORT_SPLITS = "export_splits"
 STAGE_EXTERNAL_SMPL = "external_smpl"
+
+# Robot skill taxonomy (captions / VLM stage); exactly one category per clip.
+SKILL_MANIPULATION = "manipulation"
+SKILL_LOCOMOTION = "locomotion"
+SKILL_LOCO_MANIPULATION = "loco-manipulation"
+
+VALID_SKILL_CATEGORIES: frozenset[str] = frozenset(
+    {SKILL_MANIPULATION, SKILL_LOCOMOTION, SKILL_LOCO_MANIPULATION}
+)
 
 # Fields owned by each stage (for merge / documentation).
 STAGE_FIELDS: Dict[str, tuple[str, ...]] = {
@@ -40,7 +53,10 @@ STAGE_FIELDS: Dict[str, tuple[str, ...]] = {
     STAGE_CAPTIONS: (
         "caption",
         "action_caption",
+        "robot_learnable",
+        "skill_category",
     ),
+    STAGE_PRUNE: (),
     STAGE_VIDEO2SMPL: (
         "rgb_path",
         "first_frame",
@@ -53,7 +69,8 @@ PRESERVE_KEYS = frozenset(
     {
         "caption",
         "action_caption",
-        "text",  # legacy alias of caption
+        "robot_learnable",
+        "skill_category",
         "video_path",
         "select_status",
         "select_notes",
@@ -95,10 +112,7 @@ def _nonempty_str(val: Any) -> str:
 
 def get_caption(row: Mapping[str, Any]) -> str:
     """Primary scene description (1–2 sentences)."""
-    c = _nonempty_str(row.get("caption"))
-    if c:
-        return c
-    return _nonempty_str(row.get("text"))
+    return _nonempty_str(row.get("caption"))
 
 
 def get_action_caption(row: Mapping[str, Any]) -> str:
@@ -124,20 +138,92 @@ def resolve_video_abs(root_dir: Path, row: Mapping[str, Any]) -> Path:
     return (Path(root_dir).resolve() / rel).resolve()
 
 
+def normalize_skill_category(val: Any) -> str:
+    """Map model output to one of ``VALID_SKILL_CATEGORIES`` or ``\"\"``."""
+    s = str(val or "").strip().lower()
+    if not s:
+        return ""
+    s = s.replace("_", "-").replace(" ", "-")
+    if s in ("loco-manipulation", "locomanipulation", "loco-manip", "locomanip"):
+        return SKILL_LOCO_MANIPULATION
+    if s in ("manipulation", "manip"):
+        return SKILL_MANIPULATION
+    if s in ("locomotion", "loco", "locomote"):
+        return SKILL_LOCOMOTION
+    if s in VALID_SKILL_CATEGORIES:
+        return s
+    return ""
+
+
+def parse_robot_learnable(val: Any) -> Optional[bool]:
+    if isinstance(val, bool):
+        return val
+    if val is None:
+        return None
+    s = str(val).strip().lower()
+    if s in ("true", "yes", "y", "1", "learnable", "robot_learnable"):
+        return True
+    if s in ("false", "no", "n", "0", "not_learnable", "not-learnable"):
+        return False
+    return None
+
+
 def captions_filled(row: Mapping[str, Any]) -> bool:
-    return bool(get_caption(row)) and bool(get_action_caption(row))
+    if not get_caption(row) or not get_action_caption(row):
+        return False
+    if normalize_skill_category(row.get("skill_category")) not in VALID_SKILL_CATEGORIES:
+        return False
+    learnable = parse_robot_learnable(row.get("robot_learnable"))
+    if learnable is False:
+        return False
+    # After prune, ``robot_learnable`` is stripped; treat as learnable if captions + skill ok.
+    if learnable is None and "robot_learnable" in row:
+        return False
+    return True
 
 
 def smpl_filled(row: Mapping[str, Any]) -> bool:
     return bool(_nonempty_str(row.get("smpl_path")))
 
 
+def rows_caption_complete(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Samples with all caption-stage fields filled."""
+    return [normalize_row(dict(r)) for r in rows if captions_filled(r)]
+
+
+def rows_pending_smpl(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    """Caption-complete samples that still lack ``smpl_path``."""
+    return [r for r in rows_caption_complete(rows) if not smpl_filled(r)]
+
+
+def assert_all_captioned_have_smpl(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    context: str = "video2smpl",
+) -> None:
+    """Raise if any caption-complete row is missing SMPL (hard pipeline rule)."""
+    pending = rows_pending_smpl(rows)
+    if not pending:
+        return
+    ids = [str(r.get("sample_id", "?")) for r in pending[:20]]
+    extra = f" (+{len(pending) - 20} more)" if len(pending) > 20 else ""
+    raise RuntimeError(
+        f"{context}: {len(pending)} caption-complete sample(s) still lack smpl_path "
+        f"(e.g. {', '.join(ids)}{extra}). Re-run video2smpl or fix errors."
+    )
+
+
 def normalize_row(row: MutableMapping[str, Any]) -> Dict[str, Any]:
-    """Ensure unified schema; migrate legacy ``text`` -> ``caption``."""
+    """Ensure unified schema; migrate legacy ``text`` -> ``caption`` then drop ``text``."""
     out: Dict[str, Any] = dict(row)
     sid = _nonempty_str(out.get("sample_id"))
     if sid:
         out["sample_id"] = sid
+
+    legacy_text = _nonempty_str(out.get("text"))
+    if legacy_text and not _nonempty_str(out.get("caption")):
+        out["caption"] = legacy_text
+    out.pop("text", None)
 
     cap = get_caption(out)
     if cap and not _nonempty_str(out.get("caption")):
@@ -148,6 +234,15 @@ def normalize_row(row: MutableMapping[str, Any]) -> Dict[str, Any]:
 
     out.setdefault("caption", "")
     out.setdefault("action_caption", "")
+    out.setdefault("skill_category", "")
+    if "robot_learnable" in out:
+        if out["robot_learnable"] is not None and not isinstance(out["robot_learnable"], bool):
+            out["robot_learnable"] = parse_robot_learnable(out["robot_learnable"])
+    else:
+        out.pop("robot_learnable", None)
+    scat = normalize_skill_category(out.get("skill_category"))
+    if scat:
+        out["skill_category"] = scat
     out.setdefault("video_path", "")
     out.setdefault("select_status", "")
     out.setdefault("select_notes", "")
@@ -168,12 +263,7 @@ def normalize_row(row: MutableMapping[str, Any]) -> Dict[str, Any]:
     else:
         out["stages_completed"] = [str(x) for x in sc]
 
-    # Keep legacy ``text`` in sync when caption is set (downstream readers).
-    if _nonempty_str(out.get("caption")):
-        out["text"] = out["caption"]
-    else:
-        out.setdefault("text", "")
-
+    out.pop("text", None)
     return out
 
 
@@ -191,14 +281,21 @@ def merge_preserved_fields(new_row: Dict[str, Any], old_row: Optional[Mapping[st
             out["stages_completed"] = merged
             continue
         old_val = old.get(key)
-        if key in ("caption", "action_caption", "text"):
+        if key in ("caption", "action_caption"):
             if _nonempty_str(old_val) and not _nonempty_str(out.get(key)):
+                out[key] = old_val
+            continue
+        if key == "skill_category":
+            if _nonempty_str(old_val) and not _nonempty_str(out.get(key)):
+                out[key] = normalize_skill_category(old_val)
+            continue
+        if key == "robot_learnable":
+            if isinstance(old_val, bool) and parse_robot_learnable(out.get(key)) is None:
                 out[key] = old_val
             continue
         if old_val is not None and old_val != "" and (out.get(key) in (None, "", [])):
             out[key] = old_val
-    if _nonempty_str(out.get("caption")):
-        out["text"] = out["caption"]
+    out.pop("text", None)
     return out
 
 
@@ -229,7 +326,8 @@ def new_row_template(
             "smpl_path": "",
             "caption": "",
             "action_caption": "",
-            "text": "",
+            "robot_learnable": None,
+            "skill_category": "",
             "type": "video",
             "source": source,
             "link": link,
@@ -297,11 +395,20 @@ def apply_captions_update(
     *,
     caption: str,
     action_caption: str,
+    robot_learnable: bool,
+    skill_category: str,
 ) -> Dict[str, Any]:
     out = normalize_row(row)
     out["caption"] = caption.strip()
     out["action_caption"] = action_caption.strip()
-    out["text"] = out["caption"]
+    out.pop("text", None)
+    cat = normalize_skill_category(skill_category)
+    if cat not in VALID_SKILL_CATEGORIES:
+        raise ValueError(
+            f"skill_category must be one of {sorted(VALID_SKILL_CATEGORIES)}, got {skill_category!r}"
+        )
+    out["skill_category"] = cat
+    out["robot_learnable"] = bool(robot_learnable)
     mark_stage_completed(out, STAGE_CAPTIONS)
     return out
 

@@ -45,7 +45,8 @@ CANONICAL_ROW_KEYS: tuple[str, ...] = (
     "smpl_path",
     "caption",
     "action_caption",
-    "text",
+    "robot_learnable",
+    "skill_category",
     "type",
     "source",
     "link",
@@ -62,7 +63,8 @@ TRAIN_EXPORT_KEYS: tuple[str, ...] = (
     "smpl_path",
     "caption",
     "action_caption",
-    "text",
+    "robot_learnable",
+    "skill_category",
     "video_path",
     "type",
     "source",
@@ -117,8 +119,6 @@ def export_train_row(row: Mapping[str, Any]) -> Dict[str, Any]:
     r = normalize_row(dict(row))
     out: Dict[str, Any] = {k: r.get(k, "") for k in TRAIN_EXPORT_KEYS}
     out["sample_id"] = str(r["sample_id"])
-    if not out.get("text"):
-        out["text"] = get_caption(r)
     if not out.get("caption"):
         out["caption"] = get_caption(r)
     if not out.get("action_caption"):
@@ -153,7 +153,10 @@ def layout_tree_text(root_name: str = "<root_dir>") -> str:
     return f"""{root_name}/
 ├── {MANIFEST_DEFAULT}
 ├── {MAPPING_DEFAULT}
-├── {SPLITS_DIR}/                 # reserved (train/test per dataset)
+├── {SPLITS_DIR}/
+│   ├── manipulation.json         # export_skill_splits.py (after SMPL)
+│   ├── locomotion.json
+│   └── loco-manipulation.json
 └── {DIR_PROCESSED}/<sample_id>/
     ├── <video>.mp4               # one video per sample (select moves here)
     ├── {FIRST_FRAME_FILENAME}

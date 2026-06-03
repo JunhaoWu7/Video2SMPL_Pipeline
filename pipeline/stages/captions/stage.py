@@ -10,7 +10,7 @@ from pipeline.stages.base import PipelineStage
 
 class CaptionsStage(PipelineStage):
     name = "captions"
-    description = "Fill caption + action_caption in unified manifest (in-place)"
+    description = "VLM captions + robot labels (then prune + video2smpl in same run)"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         group = parser.add_argument_group("captions stage")

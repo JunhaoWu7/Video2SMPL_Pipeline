@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-Fill ``caption`` and ``action_caption`` in the unified pipeline manifest (in-place by default).
+Fill caption fields and robot-skill labels in the unified pipeline manifest (in-place by default).
+
+Writes per clip: ``caption``, ``action_caption``, ``robot_learnable``, ``skill_category``.
 
 Reads a JSON list (e.g. dataset_manifest.json), resolves video_path / rgb_path / first_frame
 under --pipeline-root, calls a vision API, and writes both fields back to the same manifest.
@@ -111,11 +113,38 @@ def extract_json_object(text: str) -> dict[str, Any]:
     raise ValueError("Model output is not a valid JSON object.")
 
 
-def normalize_caption_output(raw: dict[str, Any]) -> dict[str, str]:
+def normalize_caption_output(raw: dict[str, Any]) -> dict[str, Any]:
     """
-    Expect JSON with ``caption`` (1–2 sentences) and ``action_caption`` (short action phrase).
-    Tolerates legacy keys: description, task_caption.
+    Expect JSON with caption, action_caption, robot_learnable, skill_category.
+    Tolerates legacy keys for text fields only.
     """
+    try:
+        from pipeline.manifest import (
+            VALID_SKILL_CATEGORIES,
+            normalize_skill_category,
+            parse_robot_learnable,
+        )
+    except ImportError:
+        VALID_SKILL_CATEGORIES = frozenset(
+            {"manipulation", "locomotion", "loco-manipulation"}
+        )
+
+        def normalize_skill_category(val: Any) -> str:
+            s = str(val or "").strip().lower().replace("_", "-").replace(" ", "-")
+            if s in ("locomanipulation", "loco-manip"):
+                return "loco-manipulation"
+            return s if s in VALID_SKILL_CATEGORIES else ""
+
+        def parse_robot_learnable(val: Any) -> bool | None:
+            if isinstance(val, bool):
+                return val
+            s = str(val or "").strip().lower()
+            if s in ("true", "yes", "1"):
+                return True
+            if s in ("false", "no", "0"):
+                return False
+            return None
+
     caption = str(raw.get("caption", "")).strip()
     if not caption:
         caption = str(raw.get("description", "")).strip()
@@ -128,12 +157,46 @@ def normalize_caption_output(raw: dict[str, Any]) -> dict[str, str]:
     if not action:
         action = str(raw.get("action", "")).strip()
 
-    return {"caption": caption, "action_caption": action}
+    skill = normalize_skill_category(
+        raw.get("skill_category", raw.get("motion_category", raw.get("category", "")))
+    )
+    learnable = parse_robot_learnable(
+        raw.get("robot_learnable", raw.get("is_robot_learnable", raw.get("learnable")))
+    )
+
+    return {
+        "caption": caption,
+        "action_caption": action,
+        "skill_category": skill,
+        "robot_learnable": learnable,
+    }
 
 
-def captions_from_output(output: dict[str, Any]) -> tuple[str, str]:
+def validate_caption_output(norm: dict[str, Any]) -> None:
+    if not norm.get("caption") or not norm.get("action_caption"):
+        raise ValueError("Model JSON missing non-empty caption or action_caption.")
+    if norm.get("skill_category") not in (
+        "manipulation",
+        "locomotion",
+        "loco-manipulation",
+    ):
+        raise ValueError(
+            f"Invalid skill_category: {norm.get('skill_category')!r}; "
+            "expected manipulation | locomotion | loco-manipulation."
+        )
+    if norm.get("robot_learnable") is None:
+        raise ValueError("Model JSON missing boolean robot_learnable.")
+
+
+def captions_from_output(output: dict[str, Any]) -> tuple[str, str, bool, str]:
     norm = normalize_caption_output(output)
-    return norm["caption"], norm["action_caption"]
+    validate_caption_output(norm)
+    return (
+        norm["caption"],
+        norm["action_caption"],
+        bool(norm["robot_learnable"]),
+        str(norm["skill_category"]),
+    )
 
 
 def load_manifest_list(path: Path) -> list[dict[str, Any]]:
@@ -235,7 +298,8 @@ def build_user_prompt_manifest(
         "bilingual": "caption in English; action_caption as a short English phrase.",
     }.get(caption_lang, "action_caption: short English phrase, verb-led.")
 
-    return f"""You analyze frames from a video clip of human motion (third-person / single person).
+    return f"""You analyze frames from a short human **action clip** (single person, third-person view).
+Assume the clip shows one coherent motion segment suitable for robot imitation learning review.
 
 Sample id: `{sid}`
 Original filename hint: `{orig}`
@@ -244,15 +308,23 @@ Media type: `{typ}`
 
 You are given {num_sampled_frames} still frames sampled uniformly over time from the clip.
 
-Output ONLY a JSON object with exactly these two fields:
+Output ONLY a JSON object with exactly these four fields:
 {{
   "caption": "1-2 sentences describing the visible motion, pose changes, and scene interaction.",
-  "action_caption": "Short action phrase naming the main motion (e.g. 'walking forward', 'picking up box')."
+  "action_caption": "Short action phrase naming the main motion (e.g. 'walking forward', 'picking up box').",
+  "robot_learnable": true,
+  "skill_category": "manipulation"
 }}
 
-Rules:
+Field rules:
 - ``caption``: 1–2 sentences; do not focus on clothing unless needed for the action.
 - ``action_caption``: concise action label for this clip; no full sentences; no bullet lists.
+- ``robot_learnable`` (boolean): true if a humanoid / mobile manipulator could **plausibly learn and reproduce** the main action from this clip (locomotion, manipulation, or both). false if the clip is not suitable, e.g. idle standing/sitting with no skill, pure conversation, camera-only motion, heavy occlusion, multi-person chaos, dance/acrobat stunts beyond typical robot skills, or action too ambiguous to label.
+- ``skill_category`` (string): assign **exactly one** category that best matches the **primary** skill in the clip:
+  - ``manipulation``: mostly upper-body / hand–object interaction; base largely stationary.
+  - ``locomotion``: mostly whole-body displacement (walk, run, step, turn, climb stairs) with little object interaction.
+  - ``loco-manipulation``: clear **combination** (walk while carrying, approach object while stepping, locomote then manipulate in one clip).
+  Pick the single best fit; do not output multiple categories.
 - {lang_line}
 - {action_lang}
 
@@ -309,18 +381,23 @@ def call_openai_caption_with_prompt(
         messages=[
             {
                 "role": "system",
-                "content": "You describe human motion in video frames accurately and concisely.",
+                "content": (
+                    "You label short human action clips for robot learning datasets: "
+                    "descriptions, robot learnability, and skill category."
+                ),
             },
             {"role": "user", "content": user_content},
         ],
-        max_tokens=400,
+        max_tokens=512,
         temperature=0.3,
     )
     text = resp.choices[0].message.content
     if not text:
-        return {"caption": "", "action_caption": ""}
+        raise ValueError("Empty model response.")
     raw = extract_json_object(text)
-    return normalize_caption_output(raw)
+    norm = normalize_caption_output(raw)
+    validate_caption_output(norm)
+    return norm
 
 
 def caption_one_sample(
@@ -329,10 +406,11 @@ def caption_one_sample(
     pipeline_root: Path,
     idx: int,
     row: dict[str, Any],
-) -> tuple[int, str, str, str, str, str | None, str]:
+) -> tuple[int, str, str, str, str, bool | None, str, str | None, str]:
     """
     Run vision API for one manifest row. idx is 1-based list position.
-    Returns (idx, sample_id, status, caption, action_caption, error_message, frame_source).
+    Returns (idx, sample_id, status, caption, action_caption, robot_learnable,
+             skill_category, error_message, frame_source).
     status: ok | error | no_frames
     """
     sid = str(row.get("sample_id", f"row{idx}"))
@@ -340,7 +418,7 @@ def caption_one_sample(
         pipeline_root, row, args.num_frames, args.max_side
     )
     if not data_urls:
-        return (idx, sid, "no_frames", "", "", None, src)
+        return (idx, sid, "no_frames", "", "", None, "", None, src)
 
     user_prompt = build_user_prompt_manifest(row, len(data_urls), args.caption_lang)
     try:
@@ -355,15 +433,27 @@ def caption_one_sample(
             label=sid,
             interval_sec=max(3.0, float(args.heartbeat_sec)),
         )
-        caption, action_caption = captions_from_output(output)
-        return (idx, sid, "ok", caption, action_caption, None, src)
+        caption, action_caption, robot_learnable, skill_category = captions_from_output(output)
+        return (
+            idx,
+            sid,
+            "ok",
+            caption,
+            action_caption,
+            robot_learnable,
+            skill_category,
+            None,
+            src,
+        )
     except Exception as e:
-        return (idx, sid, "error", "", "", str(e), src)
+        return (idx, sid, "error", "", "", None, "", str(e), src)
 
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Fill caption + action_caption in unified pipeline manifest (in-place by default)."
+        description=(
+            "Fill caption, action_caption, robot_learnable, skill_category in manifest (in-place default)."
+        )
     )
     p.add_argument(
         "--manifest",
@@ -375,7 +465,7 @@ def parse_args() -> argparse.Namespace:
         "--pipeline-root",
         type=Path,
         required=True,
-        help="Training root (same as run_pipeline --root_dir); rgb_path / first_frame resolve here.",
+        help="Training root (same as run.py --root_dir); video_path / rgb_path / first_frame resolve here.",
     )
     p.add_argument(
         "--output-manifest",
@@ -418,7 +508,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--force-recaption",
         action="store_true",
-        help="Call the API even when caption and action_caption are already filled.",
+        help="Call the API even when all caption-stage fields are already filled.",
     )
     p.add_argument("--dry-run", action="store_true", help="Do not call API; print plan only.")
     p.add_argument(
@@ -518,10 +608,12 @@ def hydrate_rows_from_disk(rows: list[dict[str, Any]], disk_path: Path) -> None:
         old = prev_by_id.get(sid)
         if not old:
             continue
-        for key in ("caption", "action_caption", "text"):
+        for key in ("caption", "action_caption", "skill_category"):
             val = str(old.get(key, "")).strip()
             if val and not str(r.get(key, "")).strip():
                 r[key] = old[key]
+        if r.get("robot_learnable") is None and isinstance(old.get("robot_learnable"), bool):
+            r["robot_learnable"] = old["robot_learnable"]
 
 
 def main() -> int:
@@ -593,7 +685,7 @@ def main() -> int:
     for idx, row in enumerate(rows, start=1):
         sid = str(row.get("sample_id", f"row{idx}"))
         if row_captions_complete(row) and not args.force_recaption:
-            print(f"[{idx}/{total}] skip (caption + action_caption filled): {sid}", flush=True)
+            print(f"[{idx}/{total}] skip (caption stage complete): {sid}", flush=True)
             continue
         pending.append((idx, row))
 
@@ -605,28 +697,44 @@ def main() -> int:
     done_count = 0
     sleep_piece = float(args.sleep) / float(workers) if args.sleep > 0 else 0.0
 
-    def _submit(item: tuple[int, dict[str, Any]]) -> tuple[int, str, str, str, str, str | None, str]:
+    def _submit(
+        item: tuple[int, dict[str, Any]],
+    ) -> tuple[int, str, str, str, str, bool | None, str, str | None, str]:
         idx, row = item
         return caption_one_sample(client, args, pipeline_root, idx, row)
 
-    def _apply_captions_to_row(row: dict[str, Any], caption: str, action_caption: str) -> None:
+    def _apply_captions_to_row(
+        row: dict[str, Any],
+        caption: str,
+        action_caption: str,
+        robot_learnable: bool,
+        skill_category: str,
+    ) -> None:
         try:
             from pipeline.manifest import apply_captions_update
 
             updated = apply_captions_update(
-                row, caption=caption, action_caption=action_caption
+                row,
+                caption=caption,
+                action_caption=action_caption,
+                robot_learnable=robot_learnable,
+                skill_category=skill_category,
             )
             row.clear()
             row.update(updated)
         except ImportError:
             row["caption"] = caption
             row["action_caption"] = action_caption
-            row["text"] = caption
+            row.pop("text", None)
+            row["robot_learnable"] = robot_learnable
+            row["skill_category"] = skill_category
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_map = {pool.submit(_submit, item): item for item in pending}
         for fut in as_completed(future_map):
-            idx, sid, status, caption, action_caption, err, src = fut.result()
+            idx, sid, status, caption, action_caption, robot_learnable, skill_category, err, src = (
+                fut.result()
+            )
             seq_elapsed = time.time() - run_start
             with file_lock:
                 done_count += 1
@@ -635,6 +743,8 @@ def main() -> int:
                     err_count += 1
                     row.setdefault("caption", "")
                     row.setdefault("action_caption", "")
+                    row.setdefault("skill_category", "")
+                    row.setdefault("robot_learnable", None)
                     print(
                         f"[done {done_count}/{len(pending)}] [{idx}/{total}] WARN: no frames sample_id={sid}",
                         file=sys.stderr,
@@ -644,6 +754,8 @@ def main() -> int:
                     err_count += 1
                     row.setdefault("caption", "")
                     row.setdefault("action_caption", "")
+                    row.setdefault("skill_category", "")
+                    row.setdefault("robot_learnable", None)
                     print(
                         f"[done {done_count}/{len(pending)}] [{idx}/{total}] ERROR {sid}: {err}",
                         file=sys.stderr,
@@ -651,13 +763,20 @@ def main() -> int:
                     )
                 else:
                     ok_count += 1
-                    _apply_captions_to_row(row, caption, action_caption)
+                    _apply_captions_to_row(
+                        row,
+                        caption,
+                        action_caption,
+                        bool(robot_learnable),
+                        skill_category,
+                    )
                     note = ""
                     if src == "first_frame":
                         note = " | note:first_frame_only"
                     print(
                         f"[done {done_count}/{len(pending)}] [{idx}/{total}] ok: {sid} | "
-                        f"action={action_caption!r} | "
+                        f"action={action_caption!r} | learnable={robot_learnable} | "
+                        f"skill={skill_category} | "
                         f"wall={format_seconds(seq_elapsed)} | ok={ok_count} err={err_count}{note}",
                         flush=True,
                     )

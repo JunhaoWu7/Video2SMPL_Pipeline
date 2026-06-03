@@ -3,7 +3,7 @@
 Export unified train/val/test manifests from dataset_manifest.json.
 
 All dataset types share the same row schema after pipeline processing; this script
-filters ready rows and writes splits/*.json for downstream training (text fields
+filters ready rows and writes splits/*.json for downstream training (caption fields
 only — no T5 / embedding export).
 
 Examples:

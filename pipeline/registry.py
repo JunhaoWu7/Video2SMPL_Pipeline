@@ -2,14 +2,23 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
+from pipeline.manifest import STAGE_PRUNE, STAGE_VIDEO2SMPL
 from pipeline.stages.base import PipelineStage
 from pipeline.stages.captions.stage import CaptionsStage
+from pipeline.stages.export_splits.stage import ExportSplitsStage
 from pipeline.stages.external_smpl.stage import ExternalSmplStage
+from pipeline.stages.prune.stage import PruneStage
 from pipeline.stages.select.stage import SelectStage
 from pipeline.stages.video2smpl.stage import Video2SmplStage
 
-# Canonical main-chain order (fixed; do not run captions before select).
-PIPELINE_STAGE_ORDER: List[str] = ["select", "captions", "video2smpl"]
+# Canonical main-chain order (fixed).
+PIPELINE_STAGE_ORDER: List[str] = [
+    "select",
+    "captions",
+    "prune",
+    "video2smpl",
+    "export_splits",
+]
 
 # Default CLI chain = full pipeline
 DEFAULT_STAGE_ORDER: List[str] = list(PIPELINE_STAGE_ORDER)
@@ -20,7 +29,9 @@ FULL_STAGE_ORDER: List[str] = PIPELINE_STAGE_ORDER
 STAGE_REGISTRY: Dict[str, PipelineStage] = {
     SelectStage.name: SelectStage(),
     CaptionsStage.name: CaptionsStage(),
+    PruneStage.name: PruneStage(),
     Video2SmplStage.name: Video2SmplStage(),
+    ExportSplitsStage.name: ExportSplitsStage(),
     ExternalSmplStage.name: ExternalSmplStage(),
 }
 
@@ -58,7 +69,7 @@ def resolve_stages_to_run(
     """
     Resolve stages to execute in canonical order.
 
-    - No ``--stages``: full chain ``select -> captions -> video2smpl``.
+    - No ``--stages``: full chain through ``export_splits``.
     - ``--stages``: subset, reordered to canonical order (not user list order).
     - ``--from-stage``: drop earlier stages. Without ``--stages``, run from that
       stage through the end of the full chain (e.g. ``--from-stage captions`` ->
@@ -90,7 +101,19 @@ def resolve_stages_to_run(
             idx = selected.index(start)
             selected = selected[idx:]
 
+    enforce_main_chain_rules(selected)
     return selected
+
+
+def enforce_main_chain_rules(stages: Sequence[str]) -> None:
+    """Hard rule: if ``prune`` runs in this invocation, ``video2smpl`` must run too."""
+    names = list(stages)
+    if STAGE_PRUNE in names and STAGE_VIDEO2SMPL not in names:
+        raise ValueError(
+            "Pipeline rule: prune must be followed by video2smpl in the same run "
+            "(e.g. default full chain, or --stages prune,video2smpl, "
+            "or finish later with --from-stage video2smpl)."
+        )
 
 
 def register_stage(stage: PipelineStage) -> None:

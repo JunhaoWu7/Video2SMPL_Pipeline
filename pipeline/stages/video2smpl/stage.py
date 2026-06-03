@@ -8,7 +8,7 @@ from pipeline.stages.base import PipelineStage
 
 class Video2SmplStage(PipelineStage):
     name = "video2smpl"
-    description = "Video -> SMPL (YOLO track, CameraHMR, smooth, canonicalize, stage-4 manifest)"
+    description = "Video -> SMPL for all caption-complete samples (required after captions)"
 
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         group = parser.add_argument_group("video2smpl stage")
@@ -31,7 +31,14 @@ class Video2SmplStage(PipelineStage):
         if not str(getattr(args, "source", "") or "").strip():
             raise ValueError('--source is required when running the "video2smpl" stage.')
 
-        from pipeline.manifest import load_manifest_list, manifest_path, resolve_video_rel
+        from pipeline.manifest import (
+            captions_filled,
+            load_manifest_list,
+            manifest_path,
+            resolve_video_rel,
+            rows_caption_complete,
+            rows_pending_smpl,
+        )
 
         root = Path(getattr(args, "root_dir", ".")).resolve()
         mpath = manifest_path(root, getattr(args, "manifest_name", None))
@@ -43,11 +50,27 @@ class Video2SmplStage(PipelineStage):
         rows = load_manifest_list(mpath)
         if not rows:
             raise ValueError(f"Manifest is empty: {mpath}")
-        missing = [str(r.get("sample_id", "?")) for r in rows if not resolve_video_rel(r)]
-        if missing:
+        if not rows_caption_complete(rows):
             raise ValueError(
-                f"{len(missing)} sample(s) lack video_path (e.g. {missing[:3]}). "
-                "Run the select stage before video2smpl."
+                f"No caption-complete samples in {mpath}. "
+                "Run the captions stage before video2smpl (caption, action_caption, "
+                "robot_learnable, skill_category)."
+            )
+        missing_video = [
+            str(r.get("sample_id", "?"))
+            for r in rows_caption_complete(rows)
+            if not resolve_video_rel(r)
+        ]
+        if missing_video:
+            raise ValueError(
+                f"{len(missing_video)} caption-complete sample(s) lack video_path "
+                f"(e.g. {missing_video[:3]}). Run select first."
+            )
+        pending = rows_pending_smpl(rows)
+        if not pending and not getattr(args, "overwrite", False):
+            print(
+                "video2smpl: all caption-complete samples already have smpl_path; nothing to do.",
+                flush=True,
             )
 
     def run(self, args: argparse.Namespace) -> None:

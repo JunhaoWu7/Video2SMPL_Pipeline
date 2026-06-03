@@ -8,7 +8,7 @@ Multi-dataset hub (recommended for production):
   python run.py --dataset humanvid --select-input-dir /path/to/raw_videos
   python run.py --hub-root /data1/wjh/HumanRetarget --dataset sports
 
-Each dataset subfolder has the same internal layout; see DATA_LAYOUT.md.
+Each dataset subfolder has the same internal layout; see doc/data_layout.md.
 
 Single-root mode (dev / examples):
   python run.py --root_dir examples/training --source my_dataset

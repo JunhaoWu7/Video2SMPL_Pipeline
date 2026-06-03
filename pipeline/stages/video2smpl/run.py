@@ -169,10 +169,13 @@ def run(args: argparse.Namespace) -> None:
     from pipeline.dataset_schema import SMPL_CANONICAL_FILENAME, sample_paths
     from pipeline.manifest import (
         build_video2smpl_row,
+        captions_filled,
         load_manifest_list,
         manifest_path,
         resolve_video_abs,
         resolve_video_rel,
+        rows_caption_complete,
+        rows_pending_smpl,
         save_manifest,
         smpl_filled,
         try_load_legacy_manifest,
@@ -240,11 +243,25 @@ def run(args: argparse.Namespace) -> None:
     )
 
     processed_this_run = 0
-    skipped = 0
+    skipped_smpl_done = 0
+    skipped_no_captions = 0
     errors = 0
 
+    caption_complete = rows_caption_complete(manifest_list)
+    if not caption_complete:
+        raise ValueError(
+            f"No caption-complete samples in {out_manifest}. "
+            "Run the captions stage first (all caption-stage fields required)."
+        )
+
+    pending_before = rows_pending_smpl(manifest_list)
+    print(
+        f"video2smpl: caption-complete={len(caption_complete)}, pending_smpl={len(pending_before)}",
+        flush=True,
+    )
+
     work_items = sorted(
-        manifest_list,
+        caption_complete,
         key=lambda r: int(r["sample_id"]) if str(r.get("sample_id", "")).isdigit() else 0,
     )
 
@@ -256,8 +273,13 @@ def run(args: argparse.Namespace) -> None:
             errors += 1
             continue
 
+        if not captions_filled(row):
+            skipped_no_captions += 1
+            print(f"WARN: skip {sample_id}: captions incomplete (unexpected in work queue)")
+            continue
+
         if smpl_filled(row) and not args.overwrite:
-            skipped += 1
+            skipped_smpl_done += 1
             continue
 
         try:
@@ -389,10 +411,18 @@ def run(args: argparse.Namespace) -> None:
             indent=2,
         )
 
+    pending_after = rows_pending_smpl(load_manifest_list(out_manifest))
+    if pending_after:
+        print(
+            f"WARN: {len(pending_after)} caption-complete sample(s) still lack smpl_path after this run.",
+            flush=True,
+        )
+
     print(f"Done. Total samples in mapping: {len(id_mapping)}")
     print(
         f"Processed this run: {processed_this_run}, "
-        f"skipped (smpl already done): {skipped}, errors/warn: {errors}"
+        f"skipped (smpl already done): {skipped_smpl_done}, "
+        f"errors: {errors}"
     )
     print(f'Manifest "source" label: {manifest_source}')
     print(f"Manifest written to: {out_manifest}")

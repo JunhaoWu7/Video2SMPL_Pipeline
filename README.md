@@ -1,122 +1,85 @@
-# pipeline 介绍
+# Video2SMPL Pipeline
 
-顶层入口：`run.py`（多子阶段编排，`--stages` / `--from-stage`）
+多阶段流水线：视频入库 → 大模型打标 → 视频转 canonical SMPL，统一写入 `dataset_manifest.json`。
 
-| 子阶段 | 文档 |
-|--------|------|
-| video2smpl（视频→SMPL） | [Video2SMPL_Readme.md](Video2SMPL_Readme.md) |
-| captions（大模型打标） | 见 Video2SMPL_Readme.md 第 5 步 |
-| external_smpl（外来 SMPL） | [process_external_smpl_README.md](process_external_smpl_README.md) |
+**入口**：`run.py`
+
+## 快速开始
 
 ```bash
-# Hub：/data1/wjh/HumanRetarget/<dataset>/（各子目录结构相同）
+# Hub（默认 /data1/wjh/HumanRetarget/<dataset>/）
 python run.py --init-dataset humanvid
 python run.py --list-datasets
+
 python run.py --dataset humanvid --select-input-dir /path/to/raw_videos
 
-# 开发单目录
-python run.py --root_dir examples/training --source my_data
+# 从打标或 SMPL 续跑
+python run.py --dataset humanvid --from-stage captions
+python run.py --dataset humanvid --from-stage video2smpl
+
+# 单目录开发
+python run.py --root_dir examples/training --source my_data \
+  --select-input-dir /path/to/videos
 ```
 
-旧入口仍可用：`pipeline/run_pipeline.py`、`pipeline/process_external_smpl.py`
+`--source`：manifest 中的来源标签；Hub 下默认与 `--dataset` 同名。详见 [doc/data_layout.md](doc/data_layout.md)。
 
-**统一数据结构**（多数据集处理后相同目录 + manifest）：见 [DATA_LAYOUT.md](DATA_LAYOUT.md)
+## 阶段顺序
+
+固定顺序：`select` → `captions` → `prune` → `video2smpl` → `export_splits`（`--stages` 会自动重排）。
+
+**编排硬规则（仅此一条）**：同一轮若跑 **prune**，必须接着跑 **video2smpl**。
+
+建议顺序仍为全流程；`export_splits`、各阶段衔接等见 `doc/`，未在代码里强制。
+
+| 阶段 | 说明文档 |
+|------|----------|
+| select | [doc/select.md](doc/select.md) |
+| captions | [doc/captions.md](doc/captions.md) |
+| prune | [doc/prune.md](doc/prune.md) |
+| video2smpl | [doc/video2smpl.md](doc/video2smpl.md) |
+| export_splits | [doc/export_splits.md](doc/export_splits.md) |
+| external_smpl（旁路） | [doc/external_smpl.md](doc/external_smpl.md) |
+
+## 文档索引
+
+| 文档 | 内容 |
+|------|------|
+| [doc/data_layout.md](doc/data_layout.md) | 目录树、manifest、`source`、导出 splits |
+| [doc/weights.md](doc/weights.md) | CameraHMR 权重下载与自检 |
+| [doc/select.md](doc/select.md) | 视频入库 |
+| [doc/captions.md](doc/captions.md) | 打标 |
+| [doc/video2smpl.md](doc/video2smpl.md) | SMPL 提取 |
+| [doc/external_smpl.md](doc/external_smpl.md) | 外来 SMPL 对齐 |
+
+## 仓库结构
+
+```
+Video2SMPL_Pipeline/
+├── run.py                          # 顶层编排
+├── generate_sequence_captions.py   # captions 实现
+├── export_train_splits.py          # 导出 train/val/test JSON
+├── export_skill_splits.py          # export_splits 阶段调用的实现（勿并入 video2smpl）
+├── requirements.txt
+├── doc/                            # 各阶段与数据说明
+├── pipeline/
+│   ├── manifest.py, dataset_schema.py, hub.py
+│   └── stages/
+│       ├── select/
+│       ├── captions/
+│       ├── prune/
+│       ├── video2smpl/
+│       ├── export_splits/
+│       └── external_smpl/
+└── third_party/                    # CameraHMR / EchoMotion  vendored
+```
+
+## 其他命令
 
 ```bash
-# 从 dataset_manifest.json 导出训练用 splits（不含 embedding）
-python export_train_splits.py --root-dir examples/training
+python run.py --list-stages
+python run.py --dataset humanvid --from-stage export_splits
+python export_train_splits.py --root-dir /data1/wjh/HumanRetarget/humanvid
 ```
 
-# Video2SMPL 权重放置说明
-
-本文档用于说明：下载后的模型权重应该放到哪些路径，避免运行时报 `file not found` 或权重文件损坏。
-
-## 权重根目录
-
-以下路径均相对于仓库根目录（`/root/projects/Video2SMPL`）：
-
-`third_party/extract_motion/CameraHMR/data/`
-
-## 必需权重与目标路径
-
-请确保这些文件**存在且非空**：
-
-- `third_party/extract_motion/CameraHMR/data/models/SMPL/SMPL_NEUTRAL.pkl`
-- `third_party/extract_motion/CameraHMR/data/pretrained-models/cam_model_cleaned.ckpt`
-- `third_party/extract_motion/CameraHMR/data/pretrained-models/camerahmr_checkpoint_cleaned.ckpt`
-- `third_party/extract_motion/CameraHMR/data/pretrained-models/model_final_f05665.pkl`
-- `third_party/extract_motion/CameraHMR/data/smpl_mean_params.npz`
-- `third_party/extract_motion/CameraHMR/data/yolo/yolov8x.pt`
-
-## 推荐下载方式（自动放到正确位置）
-
-需要先在 [CameraHMR 官网](https://camerahmr.is.tue.mpg.de/) 注册并准备好用户名密码：
-
-```bash
-cd /root/projects/Video2SMPL
-bash extract_motion/CameraHMR/fetch_smpl_model.sh
-bash extract_motion/CameraHMR/fetch_pretrained_models.sh
-```
-
-## 手动下载放置规则
-
-- `SMPL_NEUTRAL.pkl` -> `third_party/extract_motion/CameraHMR/data/models/SMPL/`
-- `cam_model_cleaned.ckpt` / `camerahmr_checkpoint_cleaned.ckpt` / `model_final_f05665.pkl`
-  -> `third_party/extract_motion/CameraHMR/data/pretrained-models/`
-- `smpl_mean_params.npz` -> `third_party/extract_motion/CameraHMR/data/`
-- `yolov8x.pt` -> `third_party/extract_motion/CameraHMR/data/yolo/`
-
-
-## 注意这个放置位置不同 
-- ` smplx_root.pt `  -> `third_party/extract_motion/CameraHMR/scripts/data_processors/motion_alignment/ `
-
-## 一键自检（存在性 + 基础可读性）
-
-```bash
-cd /root/projects/Video2SMPL
-python - <<'PY'
-from pathlib import Path
-import torch
-import numpy as np
-import pickle
-
-root = Path('/root/projects/Video2SMPL/third_party/extract_motion/CameraHMR/data')
-items = [
-    ('SMPL_NEUTRAL.pkl', root / 'models/SMPL/SMPL_NEUTRAL.pkl', 'pickle'),
-    ('cam_model_cleaned.ckpt', root / 'pretrained-models/cam_model_cleaned.ckpt', 'torch'),
-    ('camerahmr_checkpoint_cleaned.ckpt', root / 'pretrained-models/camerahmr_checkpoint_cleaned.ckpt', 'torch'),
-    ('model_final_f05665.pkl', root / 'pretrained-models/model_final_f05665.pkl', 'pickle'),
-    ('smpl_mean_params.npz', root / 'smpl_mean_params.npz', 'npz'),
-    ('yolov8x.pt', root / 'yolo/yolov8x.pt', 'torch'),
-]
-
-def ok(msg): print('[OK] ', msg)
-def miss(msg): print('[MISS]', msg)
-
-all_ok = True
-for name, p, mode in items:
-    if not p.exists() or p.stat().st_size <= 0:
-        miss(f'{name} missing/empty: {p}')
-        all_ok = False
-        continue
-    try:
-        if mode == 'pickle':
-            with p.open('rb') as f:
-                pickle.load(f, encoding='latin1')
-        elif mode == 'npz':
-            z = np.load(p, allow_pickle=True)
-            _ = list(z.files)
-            z.close()
-        elif mode == 'torch':
-            torch.load(p, map_location='cpu', weights_only=False)
-        else:
-            pass
-        ok(f'{name} readable: {p}')
-    except Exception as e:
-        miss(f'{name} NOT readable: {e}')
-        all_ok = False
-
-print('COMPLETE' if all_ok else 'INCOMPLETE')
-PY
-```
-
+安装与环境、权重见 [doc/video2smpl.md](doc/video2smpl.md) 与 [doc/weights.md](doc/weights.md)。

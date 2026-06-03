@@ -4,7 +4,7 @@ _CORE_DIR = os.path.dirname(os.path.abspath(__file__))
 _CAMERAHMR_ROOT = os.path.dirname(_CORE_DIR)
 _DATA_ROOT = os.path.join(_CAMERAHMR_ROOT, 'data')
 
-# 优先从该目录加载扁平放置的权重（与 pipeline/run_pipeline.py --weight_root 一致）
+# 优先从该目录加载扁平放置的权重（与 run.py / video2smpl --weight_root 一致）
 # 设环境变量 VIDEO2SMPL_WEIGHT_ROOT="" 可强制只用仓库内 third_party/.../data/
 _LOCAL_ENV = os.environ.get("VIDEO2SMPL_WEIGHT_ROOT")
 if _LOCAL_ENV is None:
