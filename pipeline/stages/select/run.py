@@ -1,8 +1,8 @@
 """
-Select stage (passthrough for now).
+Select stage: step1/step2/step3 filters on ``video/``, then ingest passing clips.
 
-Ingests videos from ``--select-input-dir``, assigns ``sample_id``, moves each clip into
-``processed_trainable_data/<sample_id>/``, and registers paths in ``dataset_manifest.json``.
+Rejected videos are discarded (not moved, not written to manifest).
+Select completes after step3 (``stages_completed`` includes ``select``).
 """
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pipeline.dataset_schema import DIR_PROCESSED, sample_dir_rel, sample_paths, sample_video_rel
+from pipeline.dataset_schema import DIR_PROCESSED, sample_dir_rel, sample_video_rel
+from pipeline.hub import resolve_select_input_dir
 from pipeline.manifest import (
     DEFAULT_MANIFEST_NAME,
     apply_select_update,
@@ -25,6 +26,13 @@ from pipeline.manifest import (
     save_manifest,
     try_load_legacy_manifest,
 )
+from pipeline.stages.select.filters.common import (
+    DEFAULT_SELECT_YOLO_PATH,
+    SelectFilterConfig,
+    resolve_yolo_model,
+)
+from pipeline.stages.select.filters.pipeline import run_select_filters
+from pipeline.stages.select.filters.step3_vlm import create_select_vlm_client
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv"}
 
@@ -68,6 +76,26 @@ def _collect_videos(input_dir: Path) -> List[Path]:
     return found
 
 
+def _build_filter_config(args: argparse.Namespace) -> SelectFilterConfig:
+    return SelectFilterConfig(
+        min_duration_s=float(getattr(args, "select_min_duration", 1.0)),
+        max_duration_s=float(getattr(args, "select_max_duration", 120.0)),
+        min_side_px=int(getattr(args, "select_min_side", 240)),
+        step1_sample_frames=int(getattr(args, "select_step1_frames", 12)),
+        step2_sample_frames=int(getattr(args, "select_step2_frames", 8)),
+        yolo_model=str(getattr(args, "select_yolo_model", DEFAULT_SELECT_YOLO_PATH)),
+        vlm_model=str(getattr(args, "select_vlm_model", "google/gemini-2.5-flash-lite")),
+        vlm_frames=int(getattr(args, "select_vlm_frames", 6)),
+        vlm_max_side=int(getattr(args, "select_vlm_max_side", 512)),
+        vlm_vision_detail=str(getattr(args, "select_vlm_vision_detail", "low")),
+        vlm_timeout=float(getattr(args, "select_vlm_timeout", 120.0)),
+        vlm_max_retries=int(getattr(args, "select_vlm_max_retries", 2)),
+        vlm_base_url=str(getattr(args, "select_vlm_base_url", "http://47.94.22.126/v1")),
+        vlm_http_referer=str(getattr(args, "select_vlm_http_referer", "") or ""),
+        vlm_x_title=str(getattr(args, "select_vlm_x_title", "video2smpl-select-vlm")),
+    )
+
+
 def _ingest_video(
     *,
     work_root: Path,
@@ -102,18 +130,30 @@ def run(args: argparse.Namespace) -> None:
         raise ValueError('--source is required for the "select" stage.')
 
     work_root = Path(args.root_dir).resolve()
-    if not args.select_input_dir:
-        raise ValueError(
-            "--select-input-dir is required: folder of raw videos to ingest into "
-            f"{DIR_PROCESSED}/<sample_id>/."
-        )
-    input_dir = Path(args.select_input_dir).expanduser()
-    if not input_dir.is_absolute():
-        input_dir = (work_root / input_dir).resolve()
+    input_dir = resolve_select_input_dir(work_root, getattr(args, "select_input_dir", None))
     if not input_dir.exists():
-        raise FileNotFoundError(f"Select input directory not found: {input_dir}")
+        raise FileNotFoundError(
+            f"Select input directory not found: {input_dir}. "
+            f"Place raw videos under {work_root / 'video'} or pass --select-input-dir."
+        )
 
     use_symlink = bool(getattr(args, "select_symlink", False))
+    skip_filters = bool(getattr(args, "select_skip_filters", False))
+    skip_vlm = bool(getattr(args, "select_skip_vlm", False))
+    filter_cfg = _build_filter_config(args)
+
+    yolo_resolved = resolve_yolo_model(filter_cfg.yolo_model)
+    print(f"Select step2 YOLO weights: {yolo_resolved}")
+
+    vlm_client = None
+    if not skip_vlm:
+        vlm_client = create_select_vlm_client(filter_cfg)
+        print(
+            f"Select step3 VLM: model={filter_cfg.vlm_model} "
+            f"frames={filter_cfg.vlm_frames} detail={filter_cfg.vlm_vision_detail}"
+        )
+    else:
+        print("Select step3 VLM: skipped (--select-skip-vlm); select stage will NOT be marked complete.")
 
     mapping_path = work_root / args.mapping_name
     out_manifest = manifest_path(work_root, args.manifest_name)
@@ -140,6 +180,7 @@ def run(args: argparse.Namespace) -> None:
     manifest_rows: Dict[str, Dict[str, Any]] = dict(prev_by_id)
     added = 0
     skipped = 0
+    rejected = 0
 
     videos = _collect_videos(input_dir)
     if not videos:
@@ -151,10 +192,25 @@ def run(args: argparse.Namespace) -> None:
         except ValueError:
             src_rel = str(video_path.resolve())
 
-        if src_rel in path_to_sample and not args.overwrite:
-            sid = path_to_sample[src_rel]
+        already_mapped = src_rel in path_to_sample
+        if already_mapped and not args.overwrite:
             skipped += 1
-        elif src_rel in path_to_sample and args.overwrite:
+            continue
+
+        filter_result = run_select_filters(
+            video_path,
+            cfg=filter_cfg,
+            skip_step1_step2=skip_filters,
+            skip_step3=skip_vlm,
+            vlm_client=vlm_client,
+        )
+        if filter_result.status == "rejected":
+            rejected += 1
+            continue
+
+        select_complete = not skip_vlm
+
+        if already_mapped and args.overwrite:
             sid = path_to_sample[src_rel]
             id_mapping = [it for it in id_mapping if it.get("original_path_relative") != src_rel]
         else:
@@ -174,7 +230,7 @@ def run(args: argparse.Namespace) -> None:
         except ValueError:
             video_rel = sample_video_rel(sid, dest_video.name)
 
-        if src_rel not in path_to_sample:
+        if not already_mapped:
             map_row = {
                 "sample_id": sid,
                 "seq_index": "",
@@ -191,24 +247,20 @@ def run(args: argparse.Namespace) -> None:
         if link_val is None or str(link_val).strip() == "":
             link_val = link_default
 
-        paths = sample_paths(sid, dest_video.name)
         base = new_row_template(
             sample_id=sid,
             original_video=dest_video.name,
             source=source,
             link=str(link_val),
         )
-        base["rgb_path"] = paths["video_path"]
-        base["first_frame"] = paths["first_frame"]
-        base["smpl_path"] = paths["smpl_path"]
         updated = apply_select_update(
             base,
-            video_path=paths["video_path"],
+            video_path=video_rel,
             select_status="passed",
-            select_notes="Ingested into processed_trainable_data/<sample_id>/; full select TBD.",
+            select_notes="",
             original_video_path=src_rel,
+            mark_complete=select_complete,
         )
-        updated["rgb_path"] = paths["video_path"]
         manifest_rows[sid] = merge_preserved_fields(updated, old)
 
     id_mapping.sort(key=lambda it: int(it["sample_id"]) if str(it.get("sample_id", "")).isdigit() else 0)
@@ -232,14 +284,16 @@ def run(args: argparse.Namespace) -> None:
         )
 
     mode = "symlink" if use_symlink else "move"
-    print(f"Select done. Videos ingested ({mode}): {len(videos)}")
-    print(f"  New this run: {added}, skipped (already mapped): {skipped}")
+    print(f"Select done. Scanned: {len(videos)} ({mode})")
+    print(f"  Ingested: {added}, rejected: {rejected}, skipped (mapped): {skipped}")
+    if not skip_vlm:
+        print("  Select stage marked complete (stages_completed includes 'select').")
     print(f"  Manifest: {out_manifest}")
     print(f"  Mapping: {mapping_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Select stage: ingest videos into per-sample dirs")
+    parser = argparse.ArgumentParser(description="Select stage: filter and ingest videos")
     parser.add_argument("--root_dir", type=str, default="examples/training")
     parser.add_argument("--manifest_name", type=str, default=DEFAULT_MANIFEST_NAME)
     parser.add_argument("--mapping_name", type=str, default="sample_id_to_source.json")
@@ -248,14 +302,58 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--select-input-dir",
         type=str,
-        required=True,
-        help="Folder of raw videos (searched recursively); each file -> processed_trainable_data/<id>/.",
+        default=None,
+        help="Raw video folder (default: <root_dir>/video). Recursive mp4/mov/avi/mkv.",
     )
     parser.add_argument(
         "--select-symlink",
         action="store_true",
         help="Symlink instead of move when placing video under processed_trainable_data/.",
     )
+    parser.add_argument(
+        "--select-skip-filters",
+        action="store_true",
+        help="Skip step1/step2; still runs step3 unless --select-skip-vlm.",
+    )
+    parser.add_argument(
+        "--select-skip-vlm",
+        action="store_true",
+        help="Skip step3 VLM (select stage will not be marked complete).",
+    )
+    parser.add_argument(
+        "--select-yolo-model",
+        type=str,
+        default=DEFAULT_SELECT_YOLO_PATH,
+        help=f"YOLO weights for step2 (default: {DEFAULT_SELECT_YOLO_PATH}).",
+    )
+    parser.add_argument("--select-min-duration", type=float, default=1.0)
+    parser.add_argument("--select-max-duration", type=float, default=120.0)
+    parser.add_argument("--select-min-side", type=int, default=240)
+    parser.add_argument("--select-step1-frames", type=int, default=12)
+    parser.add_argument("--select-step2-frames", type=int, default=8)
+    parser.add_argument(
+        "--select-vlm-model",
+        type=str,
+        default="google/gemini-2.5-flash-lite",
+        help="VLM model for step3 fine check.",
+    )
+    parser.add_argument("--select-vlm-frames", type=int, default=6)
+    parser.add_argument("--select-vlm-max-side", type=int, default=512)
+    parser.add_argument(
+        "--select-vlm-vision-detail",
+        type=str,
+        default="low",
+        choices=("low", "high", "auto", "original"),
+    )
+    parser.add_argument("--select-vlm-timeout", type=float, default=120.0)
+    parser.add_argument("--select-vlm-max-retries", type=int, default=2)
+    parser.add_argument(
+        "--select-vlm-base-url",
+        type=str,
+        default="http://47.94.22.126/v1",
+    )
+    parser.add_argument("--select-vlm-http-referer", type=str, default="")
+    parser.add_argument("--select-vlm-x-title", type=str, default="video2smpl-select-vlm")
     parser.add_argument("--source", type=str, required=True)
     parser.add_argument("--link", type=str, default=None)
     parser.add_argument("--default_link", type=str, default="")

@@ -7,11 +7,11 @@
 ## 快速开始
 
 ```bash
-# Hub（默认 /data1/wjh/HumanRetarget/<dataset>/）
+# Hub（默认 /data1/wjh/HumanRetarget/<dataset>/video/ 放原始视频）
 python run.py --init-dataset humanvid
 python run.py --list-datasets
-
-python run.py --dataset humanvid --select-input-dir /path/to/raw_videos
+# 视频放入 /data1/wjh/HumanRetarget/humanvid/video/ 后：
+python run.py --dataset humanvid --from-stage select
 
 # 从打标或 SMPL 续跑
 python run.py --dataset humanvid --from-stage captions
@@ -19,9 +19,8 @@ python run.py --dataset humanvid --from-stage captions
 python run.py --dataset humanvid --from-stage video2smpl
 python run.py --dataset humanvid --from-stage video2smpl --hmr-backend camerahmr
 
-# 单目录开发
-python run.py --root_dir examples/training --source my_data \
-  --select-input-dir /path/to/videos
+# 单目录开发（默认读 examples/training/video/）
+python run.py --root_dir examples/training --source my_data --from-stage select
 ```
 
 `--source`：manifest 中的来源标签；Hub 下默认与 `--dataset` 同名。详见 [doc/data_layout.md](doc/data_layout.md)。

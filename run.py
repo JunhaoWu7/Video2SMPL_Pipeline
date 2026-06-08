@@ -136,11 +136,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="dataset_manifest.json",
         help="Single manifest under root_dir; all stages update this file in place.",
     )
-    parser.add_argument("--vendor_root", type=str, default="third_party")
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--id_width", type=int, default=6)
-    parser.add_argument("--smooth_window", type=int, default=5)
-    parser.add_argument("--use_shape", action="store_true")
 
     for stage in STAGE_REGISTRY.values():
         stage.add_arguments(parser)
@@ -205,7 +202,8 @@ def main(argv: list[str] | None = None) -> int:
         name = args.init_dataset.strip()
         root = init_dataset_layout(resolve_dataset_root(hub, name), dataset_name=name, id_width=args.id_width)
         print(f"Initialized dataset layout: {root}")
-        print(f"Then ingest: python run.py --dataset {name} --select-input-dir /path/to/raw_videos")
+        print(f"Place videos in: {root / 'video'}")
+        print(f"Then ingest: python run.py --dataset {name} --from-stage select")
         return 0
 
     dataset_list = _parse_csv(args.datasets)

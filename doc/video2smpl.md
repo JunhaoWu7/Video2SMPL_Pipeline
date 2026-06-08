@@ -31,7 +31,7 @@ pipeline/stages/video2smpl/
 
 ### prompthmr（默认）
 
-1. 从 manifest 读取 `action_caption` + `caption` 拼成 **CLIP 文本 prompt**（缺则 **跳过并 WARN**）  
+1. 从 manifest 读取 `caption` 作为 **CLIP 文本 prompt**（缺则 **跳过并 WARN**）  
 2. vendored `Pipeline`：检测跟踪 → 相机 → ViTPose → PHMR+PRHMR-Vid → **world** → post_opt  
 3. 选最长 track，按视频时间轴写入 `smpl_prompthmr.npz`  
 
@@ -94,5 +94,5 @@ python -m pipeline.stages.video2smpl.prompthmr_weights
 ## 说明
 
 - 通常排在 **prune** 之后；编排规则：同一轮若跑 prune，必须接着跑 video2smpl。  
-- **prompthmr** 要求 captions 阶段已写入 `caption` 与 `action_caption`。  
+- **prompthmr** 文本 prompt 仅使用 `caption`；仍要求 captions 阶段四字段齐全（含 `action_caption`）。  
 - **export_splits** 为独立阶段，只要求 `smpl_path` 存在。

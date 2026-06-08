@@ -14,10 +14,12 @@ from typing import List
 
 from pipeline.dataset_schema import (
     DIR_PROCESSED,
+    DIR_RAW_VIDEO,
     MANIFEST_DEFAULT,
     MAPPING_DEFAULT,
     SPLITS_DIR,
     STANDARD_DATASET_DIRS,
+    default_raw_video_dir,
     layout_tree_text,
 )
 
@@ -68,6 +70,7 @@ def init_dataset_layout(dataset_root: Path, *, dataset_name: str, id_width: int 
         "manifest": MANIFEST_DEFAULT,
         "mapping": MAPPING_DEFAULT,
         "id_width": id_width,
+        "raw_video_dir": f"{DIR_RAW_VIDEO}/",
         "train_sample_dir": f"{DIR_PROCESSED}/<sample_id>/",
     }
     (root / HUB_META_FILENAME).write_text(
@@ -81,7 +84,24 @@ def is_dataset_root(path: Path) -> bool:
     p = path.resolve()
     if not p.is_dir():
         return False
-    return (p / DIR_PROCESSED).is_dir() or (p / MANIFEST_DEFAULT).is_file()
+    return (
+        (p / DIR_RAW_VIDEO).is_dir()
+        or (p / DIR_PROCESSED).is_dir()
+        or (p / MANIFEST_DEFAULT).is_file()
+    )
+
+
+def resolve_select_input_dir(dataset_root: Path | str, explicit: str | None) -> Path:
+    """Resolve select input; default is ``<dataset_root>/video``."""
+    if explicit and str(explicit).strip():
+        p = Path(explicit).expanduser()
+        root = Path(dataset_root).expanduser().resolve()
+        if not p.is_absolute():
+            p = (root / p).resolve()
+        else:
+            p = p.resolve()
+        return p
+    return default_raw_video_dir(dataset_root)
 
 
 def list_datasets(hub_root: Path | str) -> List[str]:

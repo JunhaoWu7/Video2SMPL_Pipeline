@@ -199,12 +199,8 @@ def smpl_filled_for_backend(row: Mapping[str, Any], backend: str) -> bool:
 
 
 def get_hmr_text_prompt(row: Mapping[str, Any]) -> str:
-    """Language prompt for PromptHMR (action phrase + scene context)."""
-    action = get_action_caption(row)
-    scene = get_caption(row)
-    if action and scene:
-        return f"{action}. {scene}"
-    return action or scene
+    """Language prompt for PromptHMR (scene caption only)."""
+    return get_caption(row)
 
 
 def rows_caption_complete(rows: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -397,20 +393,25 @@ def apply_select_update(
     select_status: str = "passed",
     select_notes: str = "",
     original_video_path: str = "",
+    mark_complete: bool = False,
 ) -> Dict[str, Any]:
     """
-    Reserved for the future ``select`` stage.
+    Partial select ingest (step1/step2): register ``video_path`` only.
 
-    Sets the clip path used by later caption / SMPL stages.
+    Leaves ``rgb_path`` empty and does not append ``select`` to
+    ``stages_completed`` until the full select stage is finished.
     """
     out = normalize_row(row)
     out["video_path"] = video_path
-    out["rgb_path"] = video_path
+    out["rgb_path"] = ""
     out["select_status"] = select_status
     out["select_notes"] = select_notes
     if original_video_path:
         out["original_video_path"] = original_video_path
-    mark_stage_completed(out, STAGE_SELECT)
+    if mark_complete:
+        mark_stage_completed(out, STAGE_SELECT)
+    else:
+        out["stages_completed"] = list(out.get("stages_completed") or [])
     return out
 
 

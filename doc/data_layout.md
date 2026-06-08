@@ -1,14 +1,18 @@
 # 数据集目录与 Manifest
 
-每个 Hub 数据集子目录结构相同；**无** `rgb_videos/`，视频在 select 后位于各样本目录。
+Hub 根目录默认：`/data1/wjh/HumanRetarget`。每个数据集子目录结构相同。
+
+- **待处理原始视频**：放在 `<dataset_root>/video/`（select 默认读此目录）
+- **入库后样本**：select 通过 step1/step2 后 move 到 `processed_trainable_data/<sample_id>/`
 
 ## 目录树（跑完后）
 
 ```
-<dataset_root>/
+/data1/wjh/HumanRetarget/<dataset_name>/
 ├── hub.json
 ├── dataset_manifest.json
 ├── sample_id_to_source.json
+├── video/                          # 原始视频放这里（select 输入）
 ├── splits/
 │   ├── manipulation.json           # export_skill_splits.py（SMPL 后）
 │   ├── locomotion.json
@@ -26,7 +30,7 @@
 
 | 阶段 | 写入字段 |
 |------|----------|
-| select | `video_path`, `rgb_path`, `select_status`, `source`, … |
+| select (step1/2/3) | `video_path`, `select_status=passed`；`rgb_path`/`select_notes` 留空；`stages_completed` 含 `select` |
 | captions | `caption`, `action_caption`, `robot_learnable`, `skill_category` |
 | prune | 删除 `robot_learnable=false` 样本；保留行去掉 `robot_learnable` 字段 |
 | video2smpl | `first_frame`, `smpl_path`, `smpl_backend`（`prompthmr` / `camerahmr`） |

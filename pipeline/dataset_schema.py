@@ -26,6 +26,7 @@ MAPPING_DEFAULT = "sample_id_to_source.json"
 SPLITS_DIR = "splits"
 
 DIR_PROCESSED = "processed_trainable_data"
+DIR_RAW_VIDEO = "video"
 SPLITS_DIR_NAME = SPLITS_DIR
 
 SMPL_CAMERAHMR_FILENAME = "smpl_canonical.npz"
@@ -40,6 +41,7 @@ VALID_HMR_BACKENDS = frozenset({HMR_BACKEND_PROMPTHMR, HMR_BACKEND_CAMERAHMR})
 DEFAULT_HMR_BACKEND = HMR_BACKEND_PROMPTHMR
 
 STANDARD_DATASET_DIRS: tuple[str, ...] = (
+    DIR_RAW_VIDEO,
     DIR_PROCESSED,
     SPLITS_DIR,
 )
@@ -176,10 +178,16 @@ def filter_train_ready(
     return out
 
 
+def default_raw_video_dir(dataset_root: Path | str) -> Path:
+    """Default select input: ``<dataset_root>/video/``."""
+    return Path(dataset_root).expanduser().resolve() / DIR_RAW_VIDEO
+
+
 def layout_tree_text(root_name: str = "<root_dir>") -> str:
     return f"""{root_name}/
 ├── {MANIFEST_DEFAULT}
 ├── {MAPPING_DEFAULT}
+├── {DIR_RAW_VIDEO}/                # raw clips to ingest (select input)
 ├── {SPLITS_DIR}/
 │   ├── manipulation.json         # export_skill_splits.py (after SMPL)
 │   ├── locomotion.json

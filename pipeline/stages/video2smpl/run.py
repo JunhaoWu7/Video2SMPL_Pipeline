@@ -144,12 +144,12 @@ def run(args: argparse.Namespace) -> None:
         if backend == HMR_BACKEND_PROMPTHMR:
             if not captions_filled(row):
                 skipped_no_caption += 1
-                print(f"WARN: skip {sample_id}: caption/action_caption missing (required for prompthmr)")
+                print(f"WARN: skip {sample_id}: captions incomplete (required before prompthmr)")
                 continue
             text_prompt = get_hmr_text_prompt(row)
             if not text_prompt:
                 skipped_no_caption += 1
-                print(f"WARN: skip {sample_id}: empty caption text for prompthmr")
+                print(f"WARN: skip {sample_id}: empty caption for prompthmr text prompt")
                 continue
 
         try:
