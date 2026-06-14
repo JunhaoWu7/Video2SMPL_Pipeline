@@ -39,6 +39,10 @@ from pipeline.registry import (  # noqa: E402
     list_stage_names,
     resolve_stages_to_run,
 )
+from pipeline.stage_timing import (  # noqa: E402
+    PipelineStageTimer,
+    resolve_timing_log_path,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -138,6 +142,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--device", type=str, default=None)
     parser.add_argument("--id_width", type=int, default=6)
+    parser.add_argument(
+        "--timing-log",
+        type=str,
+        default=None,
+        help="Stage timing log file (default: <root_dir>/logs/pipeline_stage_timings.log).",
+    )
+    parser.add_argument(
+        "--no-stage-timing",
+        action="store_true",
+        help="Disable per-stage timing output and log file.",
+    )
+    parser.add_argument(
+        "--timing-tick-interval",
+        type=float,
+        default=30.0,
+        help="Live in-stage progress tick interval in seconds (0=disable ticks).",
+    )
 
     for stage in STAGE_REGISTRY.values():
         stage.add_arguments(parser)
@@ -164,15 +185,45 @@ def _apply_root_and_source(args: argparse.Namespace, dataset_name: str | None) -
 def _run_pipeline_for_args(args: argparse.Namespace) -> None:
     stage_names = _parse_csv(args.stages)
     to_run = resolve_stages_to_run(stage_names, args.from_stage)
-    print(f"Pipeline root: {Path(args.root_dir).resolve()}")
+    root = Path(args.root_dir).resolve()
+    dataset_label = str(getattr(args, "dataset", "") or "").strip() or "single-root"
+    timing_enabled = not bool(getattr(args, "no_stage_timing", False))
+    timing_log = (
+        resolve_timing_log_path(root, getattr(args, "timing_log", None))
+        if timing_enabled
+        else None
+    )
+
+    print(f"Pipeline root: {root}")
     print(f"Manifest source label: {args.source}")
     print(f"Stages to run: {', '.join(to_run)}")
-    for name in to_run:
-        stage = STAGE_REGISTRY[name]
-        print(f"\n=== Stage: {name} ({args.dataset or 'single-root'}) ===")
-        stage.validate_args(args)
-        stage.run(args)
-    print(f"\nFinished: {', '.join(to_run)} @ {args.root_dir}")
+    if timing_enabled:
+        print(f"Stage timing log: {timing_log}")
+
+    tick_interval = 0.0 if not timing_enabled else float(getattr(args, "timing_tick_interval", 30.0))
+    timer = PipelineStageTimer(
+        root_dir=root,
+        dataset=dataset_label,
+        stages_planned=to_run,
+        log_path=timing_log,
+        enabled=timing_enabled,
+        tick_interval_sec=tick_interval,
+    )
+    timer.begin_run()
+    try:
+        for name in to_run:
+            stage = STAGE_REGISTRY[name]
+
+            def _run_one_stage(stage_name: str = name, stage_obj=stage) -> None:
+                print(f"\n=== Stage: {stage_name} ({dataset_label}) ===")
+                stage_obj.validate_args(args)
+                stage_obj.run(args)
+
+            timer.run_stage(name, _run_one_stage)
+    finally:
+        timer.end_run()
+
+    print(f"\nFinished: {', '.join(to_run)} @ {root}")
 
 
 def main(argv: list[str] | None = None) -> int:

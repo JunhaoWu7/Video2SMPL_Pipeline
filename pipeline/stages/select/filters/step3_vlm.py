@@ -159,8 +159,10 @@ def create_select_vlm_client(cfg: SelectFilterConfig) -> Any:
         x_title=cfg.vlm_x_title,
     )
     client, _timeout, _base = create_openai_client(ns)
-    if not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+    from pipeline.llm_defaults import resolve_llm_api_key
+
+    if not resolve_llm_api_key():
         raise RuntimeError(
-            "Step3 VLM requires OPENROUTER_API_KEY or OPENAI_API_KEY in the environment."
+            "Step3 VLM requires TOKENROUTER_API_KEY or OPENAI_API_KEY in the environment."
         )
     return client

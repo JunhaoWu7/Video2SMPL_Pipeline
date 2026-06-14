@@ -42,6 +42,13 @@ VALID_SKILL_CATEGORIES: frozenset[str] = frozenset(
     {SKILL_MANIPULATION, SKILL_LOCOMOTION, SKILL_LOCO_MANIPULATION}
 )
 
+CAPTION_STAGE_FIELDS: tuple[str, ...] = (
+    "caption",
+    "action_caption",
+    "robot_learnable",
+    "skill_category",
+)
+
 # Fields owned by each stage (for merge / documentation).
 STAGE_FIELDS: Dict[str, tuple[str, ...]] = {
     STAGE_SELECT: (
@@ -160,6 +167,8 @@ def normalize_skill_category(val: Any) -> str:
 def parse_robot_learnable(val: Any) -> Optional[bool]:
     if isinstance(val, bool):
         return val
+    if type(val) is int and val in (0, 1):
+        return bool(val)
     if val is None:
         return None
     s = str(val).strip().lower()
@@ -170,18 +179,22 @@ def parse_robot_learnable(val: Any) -> Optional[bool]:
     return None
 
 
-def captions_filled(row: Mapping[str, Any]) -> bool:
-    if not get_caption(row) or not get_action_caption(row):
-        return False
+def caption_missing_fields(row: Mapping[str, Any]) -> List[str]:
+    """Return caption-stage field names that are still empty / invalid."""
+    missing: List[str] = []
+    if not get_caption(row):
+        missing.append("caption")
+    if not get_action_caption(row):
+        missing.append("action_caption")
     if normalize_skill_category(row.get("skill_category")) not in VALID_SKILL_CATEGORIES:
-        return False
-    learnable = parse_robot_learnable(row.get("robot_learnable"))
-    if learnable is False:
-        return False
-    # After prune, ``robot_learnable`` is stripped; treat as learnable if captions + skill ok.
-    if learnable is None and "robot_learnable" in row:
-        return False
-    return True
+        missing.append("skill_category")
+    if parse_robot_learnable(row.get("robot_learnable")) is None:
+        missing.append("robot_learnable")
+    return missing
+
+
+def captions_filled(row: Mapping[str, Any]) -> bool:
+    return not caption_missing_fields(row)
 
 
 def smpl_filled(row: Mapping[str, Any]) -> bool:
@@ -423,18 +436,45 @@ def apply_captions_update(
     robot_learnable: bool,
     skill_category: str,
 ) -> Dict[str, Any]:
+    return apply_captions_partial_update(
+        row,
+        caption=caption,
+        action_caption=action_caption,
+        robot_learnable=robot_learnable,
+        skill_category=skill_category,
+        mark_complete=True,
+    )
+
+
+def apply_captions_partial_update(
+    row: Dict[str, Any],
+    *,
+    caption: Optional[str] = None,
+    action_caption: Optional[str] = None,
+    robot_learnable: Optional[bool] = None,
+    skill_category: Optional[str] = None,
+    mark_complete: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Merge only provided caption-stage fields; preserve pre-filled values."""
     out = normalize_row(row)
-    out["caption"] = caption.strip()
-    out["action_caption"] = action_caption.strip()
+    if caption is not None:
+        out["caption"] = caption.strip()
+    if action_caption is not None:
+        out["action_caption"] = action_caption.strip()
+    if skill_category is not None:
+        cat = normalize_skill_category(skill_category)
+        if cat not in VALID_SKILL_CATEGORIES:
+            raise ValueError(
+                f"skill_category must be one of {sorted(VALID_SKILL_CATEGORIES)}, got {skill_category!r}"
+            )
+        out["skill_category"] = cat
+    if robot_learnable is not None:
+        out["robot_learnable"] = bool(robot_learnable)
     out.pop("text", None)
-    cat = normalize_skill_category(skill_category)
-    if cat not in VALID_SKILL_CATEGORIES:
-        raise ValueError(
-            f"skill_category must be one of {sorted(VALID_SKILL_CATEGORIES)}, got {skill_category!r}"
-        )
-    out["skill_category"] = cat
-    out["robot_learnable"] = bool(robot_learnable)
-    mark_stage_completed(out, STAGE_CAPTIONS)
+    if mark_complete is None:
+        mark_complete = captions_filled(out)
+    if mark_complete and captions_filled(out):
+        mark_stage_completed(out, STAGE_CAPTIONS)
     return out
 
 

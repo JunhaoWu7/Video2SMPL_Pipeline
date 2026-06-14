@@ -22,6 +22,7 @@ REPLACEMENTS = [
     ("OmegaConf.load(\"pipeline/", 'OmegaConf.load("phmr_pipeline/'),
     ("OmegaConf.load('pipeline/", "OmegaConf.load('phmr_pipeline/"),
     ("np.loadtxt('pipeline/", "np.loadtxt('phmr_pipeline/"),
+    ("_target_=pipeline.", "_target_=phmr_pipeline."),
 ]
 
 

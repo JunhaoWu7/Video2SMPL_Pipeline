@@ -10,6 +10,8 @@ try:
 except ImportError:  # pragma: no cover
     cv2 = None  # type: ignore
 
+from pipeline.llm_defaults import DEFAULT_LLM_BASE_URL, DEFAULT_SELECT_VLM_MODEL
+
 SelectFilterOutcome = Literal["passed", "deferred", "rejected"]
 
 # Shared with PromptHMR pretrain layout (step2 person detection).
@@ -22,19 +24,19 @@ class SelectFilterConfig:
     max_duration_s: float = 120.0
     min_side_px: int = 240
     step1_sample_frames: int = 12
-    step2_sample_frames: int = 8
+    step2_sample_frames: int = 16
     static_frame_ratio_reject: float = 0.95
     motion_max_reject: float = 0.01
     motion_mean_defer: float = 0.015
     yolo_model: str = DEFAULT_SELECT_YOLO_PATH
     yolo_conf: float = 0.25
-    vlm_model: str = "google/gemini-2.5-flash-lite"
+    vlm_model: str = DEFAULT_SELECT_VLM_MODEL
     vlm_frames: int = 6
     vlm_max_side: int = 512
     vlm_vision_detail: str = "low"
     vlm_timeout: float = 120.0
     vlm_max_retries: int = 2
-    vlm_base_url: str = "http://47.94.22.126/v1"
+    vlm_base_url: str = DEFAULT_LLM_BASE_URL
     vlm_http_referer: str = ""
     vlm_x_title: str = "video2smpl-select-vlm"
 

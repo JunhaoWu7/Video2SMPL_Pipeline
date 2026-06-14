@@ -293,6 +293,8 @@ class Pipeline:
         self.images = images[:max_frame]
         self.seq_folder = seq_folder
         self.cfg.seq_folder = seq_folder
+        # post_optimization moves self.smplx to CUDA; reset before each video.
+        self.smplx = self.smplx.cpu()
 
         if os.path.isfile(f'{seq_folder}/results.pkl'):
             print('Loading available results...')

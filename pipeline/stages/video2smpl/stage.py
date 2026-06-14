@@ -8,6 +8,7 @@ from pipeline.dataset_schema import (
     HMR_BACKEND_CAMERAHMR,
     HMR_BACKEND_PROMPTHMR,
 )
+from pipeline.parallel_defaults import DEFAULT_GPU_WORKERS
 from pipeline.stages.base import PipelineStage
 from pipeline.stages.video2smpl.common import normalize_hmr_backend
 
@@ -66,6 +67,18 @@ class Video2SmplStage(PipelineStage):
             help="CameraHMR DART floor alignment (camerahmr only).",
         )
         group.add_argument("--use_shape", action="store_true")
+        group.add_argument(
+            "--video2smpl-workers",
+            type=int,
+            default=0,
+            help=f"Parallel workers (0=auto: {DEFAULT_GPU_WORKERS} GPUs; 1=serial).",
+        )
+        group.add_argument(
+            "--video2smpl-gpus",
+            type=str,
+            default="auto",
+            help=f'GPU list for workers (default: auto = first {DEFAULT_GPU_WORKERS} CUDA devices).',
+        )
 
     def validate_args(self, args: argparse.Namespace) -> None:
         if not str(getattr(args, "source", "") or "").strip():

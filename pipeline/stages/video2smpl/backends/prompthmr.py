@@ -86,6 +86,8 @@ def run_prompthmr_sample(
     max_frame = int(getattr(args, "max_frames", 500))
     ckpt_root = getattr(args, "prompthmr_ckpt_root", None)
 
+    # apply_caption_text_patch imports phmr_pipeline; vendor sys.path must exist first.
+    setup_prompthmr_runtime(vendor_root=vendor_root, ckpt_root=ckpt_root)
     apply_caption_text_patch(prompt)
     pipeline = _get_pipeline(static_cam, vendor_root, ckpt_root)
 

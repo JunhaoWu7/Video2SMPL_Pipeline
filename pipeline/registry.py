@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
-from pipeline.manifest import STAGE_PRUNE, STAGE_VIDEO2SMPL
 from pipeline.stages.base import PipelineStage
 from pipeline.stages.captions.stage import CaptionsStage
 from pipeline.stages.export_splits.stage import ExportSplitsStage
@@ -101,19 +100,7 @@ def resolve_stages_to_run(
             idx = selected.index(start)
             selected = selected[idx:]
 
-    enforce_main_chain_rules(selected)
     return selected
-
-
-def enforce_main_chain_rules(stages: Sequence[str]) -> None:
-    """Hard rule: if ``prune`` runs in this invocation, ``video2smpl`` must run too."""
-    names = list(stages)
-    if STAGE_PRUNE in names and STAGE_VIDEO2SMPL not in names:
-        raise ValueError(
-            "Pipeline rule: prune must be followed by video2smpl in the same run "
-            "(e.g. default full chain, or --stages prune,video2smpl, "
-            "or finish later with --from-stage video2smpl)."
-        )
 
 
 def register_stage(stage: PipelineStage) -> None:

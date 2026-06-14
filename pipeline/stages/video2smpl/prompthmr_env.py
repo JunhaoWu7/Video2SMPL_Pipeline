@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import sys
 from pathlib import Path
 from typing import List, Optional
+
+# Minimal imports needed before ``phmr_pipeline.pipeline`` loads.
+_PROMPTHMR_RUNTIME_MODULES = ("joblib", "smplcodec")
 
 from pipeline.stages.video2smpl.prompthmr_paths import (
     PHMR_PKG,
@@ -22,6 +26,32 @@ def vendor_bundle_dir(explicit: Optional[str] = None) -> Path:
     if env:
         return Path(env).expanduser().resolve()
     return VENDOR_BUNDLE_DIR.resolve()
+
+
+def verify_prompthmr_runtime(
+    *,
+    vendor_root: Optional[str] = None,
+    ckpt_root: Optional[str] = None,
+) -> None:
+    """
+    Fail fast when the active conda env lacks PromptHMR runtime deps.
+
+    Recommended env: ``phmr_pt2.4`` (see doc/prompthmr_vendor.md).
+    """
+    missing = [
+        name for name in _PROMPTHMR_RUNTIME_MODULES if importlib.util.find_spec(name) is None
+    ]
+    if missing:
+        raise RuntimeError(
+            "PromptHMR backend missing Python package(s): "
+            + ", ".join(missing)
+            + "\nSwitch to the PromptHMR env before video2smpl:\n"
+            + "  conda activate phmr_pt2.4\n"
+            + "  python run.py ... --stages video2smpl\n"
+            + "Or install deps into the current env (may need more than joblib/smplcodec)."
+        )
+    setup_prompthmr_runtime(vendor_root=vendor_root, ckpt_root=ckpt_root)
+    import phmr_pipeline.pipeline  # noqa: F401
 
 
 def setup_prompthmr_runtime(

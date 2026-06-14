@@ -20,7 +20,7 @@ prune 时 SMPL **还没跑**，目录里通常只有视频（没有 `smpl_canoni
 
 因此对 `robot_learnable=false` 的样本：**manifest / mapping 删掉 + 整目录 `shutil.rmtree`**，从数据集里彻底清掉。
 
-保留的样本会去掉 manifest 里的 `robot_learnable` 字段（隐含均为可学习），再进入 video2smpl。
+保留的样本**保留** manifest 里的 `robot_learnable` 字段（应为 `true`），再进入 video2smpl。
 
 ## 行为摘要
 
@@ -29,7 +29,8 @@ prune 时 SMPL **还没跑**，目录里通常只有视频（没有 `smpl_canoni
 | manifest | 移除不可学习行 |
 | mapping | 同步移除 |
 | 磁盘 | 删除 `processed_trainable_data/<id>/` |
-| 保留行 | 去掉 `robot_learnable` 字段 |
+| 保留行 | 保留 `robot_learnable`（应为 `true`） |
+| 重编号 | 剔除后将剩余 `sample_id` 重排为 `000001`..`N`，并重命名对应目录 |
 
 ## 命令
 

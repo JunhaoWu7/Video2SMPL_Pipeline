@@ -21,7 +21,7 @@
 ## 命令
 
 ```bash
-export OPENROUTER_API_KEY=...   # 或 OPENAI_API_KEY
+export TOKENROUTER_API_KEY=...   # 或 OPENAI_API_KEY
 
 python run.py --init-dataset humanvid
 # 视频放入 /data1/wjh/HumanRetarget/humanvid/video/
@@ -40,7 +40,7 @@ python run.py --dataset humanvid --from-stage select --select-skip-vlm
 | 步骤 | 依赖 |
 |------|------|
 | Step2 YOLO | 默认 `/data1/wjh/ckpt/PromptHMR/pretrain/yolo11x.pt`；可覆盖 `--select-yolo-model` 或 `VIDEO2SMPL_SELECT_YOLO` |
-| Step3 VLM | `OPENROUTER_API_KEY` / `OPENAI_API_KEY`；默认模型 `google/gemini-2.5-flash-lite`；base URL 同 captions（`http://47.94.22.126/v1`） |
+| Step3 VLM | `TOKENROUTER_API_KEY` / `OPENAI_API_KEY`；默认模型 `google/gemini-2.5-flash-image`；默认 base URL [TokenRouter](https://www.tokenrouter.com/docs) `https://api.tokenrouter.com/v1` |
 
 自检：
 
@@ -55,13 +55,16 @@ python scripts/test_select_step3.py
 | `--select-input-dir` | `<root_dir>/video` | 递归扫描 `mp4/mov/avi/mkv` |
 | `--select-skip-filters` | off | 跳过 step1/step2 |
 | `--select-skip-vlm` | off | 跳过 step3 |
+| `--select-step2-frames` | `16` | step2 YOLO 抽帧数（含多人判定） |
 | `--select-yolo-model` | `/data1/wjh/ckpt/PromptHMR/pretrain/yolo11x.pt` | step2 YOLO |
-| `--select-vlm-model` | `google/gemini-2.5-flash-lite` | step3 VLM |
+| `--select-vlm-model` | `google/gemini-2.5-flash-image` | step3 VLM |
 | `--select-vlm-frames` | `6` | step3 抽帧数 |
 | `--select-vlm-vision-detail` | `low` | 省 token |
 | `--select-vlm-base-url` | captions 同款 | OpenAI 兼容 API |
 
 ## Manifest 写入（select 完成后）
+
+剔除（`rejected`）后仅保留已入库样本（`sample_id_to_source.json` 中有映射的行），并将 `sample_id` **重排为连续的** `000001`..`N`（同步重命名 `processed_trainable_data/<id>/` 与 manifest 路径字段）。
 
 | 字段 | 值 |
 |------|-----|

@@ -4,6 +4,7 @@ torchvision==0.21.0
 torchaudio==2.6.0
 
 # Numeric / IO
+joblib
 numpy==1.23.5
 opencv-python==4.11.0.86
 tqdm

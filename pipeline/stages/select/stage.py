@@ -4,7 +4,13 @@ import argparse
 import os
 
 from pipeline.stages.base import PipelineStage
+from pipeline.llm_defaults import (
+    DEFAULT_LLM_BASE_URL,
+    DEFAULT_SELECT_VLM_MODEL,
+    resolve_llm_api_key,
+)
 from pipeline.stages.select.filters.common import DEFAULT_SELECT_YOLO_PATH
+from pipeline.parallel_defaults import DEFAULT_STAGE_WORKERS
 
 
 class SelectStage(PipelineStage):
@@ -48,11 +54,11 @@ class SelectStage(PipelineStage):
         group.add_argument("--select-max-duration", type=float, default=120.0)
         group.add_argument("--select-min-side", type=int, default=240)
         group.add_argument("--select-step1-frames", type=int, default=12)
-        group.add_argument("--select-step2-frames", type=int, default=8)
+        group.add_argument("--select-step2-frames", type=int, default=16)
         group.add_argument(
             "--select-vlm-model",
             type=str,
-            default="google/gemini-2.5-flash-lite",
+            default=DEFAULT_SELECT_VLM_MODEL,
         )
         group.add_argument("--select-vlm-frames", type=int, default=6)
         group.add_argument("--select-vlm-max-side", type=int, default=512)
@@ -67,10 +73,16 @@ class SelectStage(PipelineStage):
         group.add_argument(
             "--select-vlm-base-url",
             type=str,
-            default="http://47.94.22.126/v1",
+            default=DEFAULT_LLM_BASE_URL,
         )
         group.add_argument("--select-vlm-http-referer", type=str, default="")
         group.add_argument("--select-vlm-x-title", type=str, default="video2smpl-select-vlm")
+        group.add_argument(
+            "--select-workers",
+            type=int,
+            default=DEFAULT_STAGE_WORKERS,
+            help=f"Parallel filter workers per video (default: {DEFAULT_STAGE_WORKERS}). Use 1 for serial.",
+        )
 
     def validate_args(self, args: argparse.Namespace) -> None:
         if not str(getattr(args, "source", "") or "").strip():
@@ -87,9 +99,9 @@ class SelectStage(PipelineStage):
                 f"Place videos under {root / 'video'} or pass --select-input-dir."
             )
         if not getattr(args, "select_skip_vlm", False):
-            if not (os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OPENAI_API_KEY")):
+            if not resolve_llm_api_key():
                 raise ValueError(
-                    "Step3 VLM requires OPENROUTER_API_KEY or OPENAI_API_KEY "
+                    "Step3 VLM requires TOKENROUTER_API_KEY or OPENAI_API_KEY "
                     "(or pass --select-skip-vlm)."
                 )
 

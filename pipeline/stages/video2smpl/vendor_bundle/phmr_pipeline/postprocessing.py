@@ -232,4 +232,6 @@ def post_optimization(cfg, results, images, smplx, opt_contact=True, loss_kp_w=0
     results['camera_world']['Rwc'] = Rwc
     results['camera_world']['Twc'] = Twc
 
+    # Restore shared Pipeline.smplx to CPU for the next video's world_hps_estimation.
+    smplx.cpu()
     return results

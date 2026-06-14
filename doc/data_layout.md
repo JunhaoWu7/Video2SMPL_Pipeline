@@ -32,7 +32,7 @@ Hub 根目录默认：`/data1/wjh/HumanRetarget`。每个数据集子目录结�
 |------|----------|
 | select (step1/2/3) | `video_path`, `select_status=passed`；`rgb_path`/`select_notes` 留空；`stages_completed` 含 `select` |
 | captions | `caption`, `action_caption`, `robot_learnable`, `skill_category` |
-| prune | 删除 `robot_learnable=false` 样本；保留行去掉 `robot_learnable` 字段 |
+| prune | 删除 `robot_learnable=false` 样本；保留行保留 `robot_learnable` |
 | video2smpl | `first_frame`, `smpl_path`, `smpl_backend`（`prompthmr` / `camerahmr`） |
 
 `skill_category` 取值（每条 clip **仅一类**）：`manipulation`、`locomotion`、`loco-manipulation`。

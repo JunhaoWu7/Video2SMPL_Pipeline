@@ -2,7 +2,7 @@
 Remove samples with ``robot_learnable == false`` after the captions stage.
 
 Deletes ``processed_trainable_data/<sample_id>/`` and drops manifest / mapping rows.
-Kept rows no longer store ``robot_learnable`` (all remaining clips are learnable).
+Kept rows retain ``robot_learnable`` (expected ``true`` for all remaining clips).
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from pipeline.dataset_schema import DIR_PROCESSED, sample_dir_rel
+from pipeline.sample_renumber import renumber_sample_ids
+from pipeline.stage_timing import stage_progress_set_total, stage_progress_update
 from pipeline.manifest import (
     DEFAULT_MANIFEST_NAME,
     STAGE_PRUNE,
@@ -71,13 +73,16 @@ def prune_non_learnable(
     removed_ids: List[str] = []
     warn_ids: List[str] = []
 
-    for row in rows:
+    stage_progress_set_total(len(rows))
+    for idx, row in enumerate(rows, start=1):
         sid = str(row.get("sample_id", "")).strip()
         if not sid:
             continue
+        stage_progress_update(done=idx - 1, total=len(rows), item=sid, note="prune")
         learnable = parse_robot_learnable(row.get("robot_learnable"))
         if learnable is False:
             removed_ids.append(sid)
+            stage_progress_update(done=idx, note="removed")
             if not dry_run:
                 sample_dir = _sample_dir_abs(work_root, sid)
                 if sample_dir.is_dir():
@@ -87,13 +92,14 @@ def prune_non_learnable(
         if not captions_filled(row):
             warn_ids.append(sid)
             kept.append(row)
+            stage_progress_update(done=idx, note="kept(caption incomplete)")
             continue
 
         cleaned = dict(row)
-        cleaned.pop("robot_learnable", None)
         if not dry_run:
             mark_stage_completed(cleaned, STAGE_PRUNE)
         kept.append(cleaned)
+        stage_progress_update(done=idx, note="kept")
 
     return kept, removed_ids, warn_ids
 
@@ -130,10 +136,23 @@ def run(args: argparse.Namespace) -> None:
     if args.dry_run:
         return
 
-    save_manifest(out_manifest, kept)
+    kept_ids = {str(r.get("sample_id", "")).strip() for r in kept if r.get("sample_id")}
+    mapping_items = [
+        it for it in _load_mapping(mapping_path) if str(it.get("sample_id", "")).strip() in kept_ids
+    ]
 
-    kept_ids = {str(r.get("sample_id", "")) for r in kept}
-    mapping_items = [it for it in _load_mapping(mapping_path) if str(it.get("sample_id", "")) in kept_ids]
+    kept, mapping_items, id_remap = renumber_sample_ids(
+        work_root,
+        kept,
+        mapping_items,
+        id_width=args.id_width,
+    )
+    changed = sum(1 for old, new in id_remap.items() if old != new)
+    if changed:
+        last_id = f"{len(kept):0{args.id_width}d}" if kept else "0"
+        print(f"  Renumbered sample_id: {changed} dir(s) -> contiguous 000001..{last_id}")
+
+    save_manifest(out_manifest, kept)
     _save_mapping(mapping_path, work_root, args.id_width, mapping_items)
 
 

@@ -34,6 +34,7 @@ def required_weight_paths(ckpt: Path, smpl_ckpt: Path) -> List[Tuple[str, Path, 
         ("smplx slim npz", bm / "smplx/SMPLX_neutral_array_f32_slim.npz", True),
         ("smplx2smpl", bm / "smplx2smpl.pkl", True),
         ("SMPLX_NEUTRAL", smpl_ckpt / "smplx/SMPLX_NEUTRAL.npz", True),
+        ("SMPL neutral pkl dir", smpl_ckpt / "smpl", True),
         ("yolo11x (ByteTrack only)", pre / "yolo11x.pt", False),
         ("droid.pth (unused by SLAM)", pre / "droid.pth", False),
     ]
@@ -59,7 +60,10 @@ def check_weights(
     for label, path, required in required_weight_paths(ckpt, smpl_ckpt):
         if "droidcalib" in label:
             required = require_slam
-        ok = path.is_file() and path.stat().st_size > 0
+        if label == "SMPL neutral pkl dir":
+            ok = path.is_dir() and any(path.glob("SMPL_*.pkl"))
+        else:
+            ok = path.is_file() and path.stat().st_size > 0
         if not ok and not required:
             warnings.append(f"WARN (optional) {label}: {path}")
             continue

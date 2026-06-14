@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from pipeline.dataset_schema import (
     HMR_BACKEND_CAMERAHMR,
@@ -28,6 +30,8 @@ from pipeline.manifest import (
     smpl_filled_for_backend,
     try_load_legacy_manifest,
 )
+from pipeline.parallel_defaults import DEFAULT_GPU_WORKERS
+from pipeline.stage_timing import stage_progress_set_total, stage_progress_update
 from pipeline.stages.video2smpl.backends.camerahmr import run_camerahmr_sample
 from pipeline.stages.video2smpl.backends.prompthmr import run_prompthmr_sample
 from pipeline.stages.video2smpl.common import (
@@ -38,6 +42,125 @@ from pipeline.stages.video2smpl.common import (
     parse_sample_id_numeric,
     resolve_manifest_link,
 )
+from pipeline.stages.video2smpl.mp_worker import process_video2smpl_task
+
+
+def _list_available_gpus() -> List[int]:
+    try:
+        import torch
+
+        n = int(torch.cuda.device_count())
+        return list(range(n)) if n > 0 else [0]
+    except Exception:
+        return [0]
+
+
+def _parse_video2smpl_gpus(spec: str) -> List[int]:
+    raw = (spec or "auto").strip().lower()
+    if raw in ("auto", ""):
+        return _list_available_gpus()[:DEFAULT_GPU_WORKERS]
+    return [int(part.strip()) for part in raw.split(",") if part.strip()]
+
+
+def _resolve_video2smpl_workers(args: argparse.Namespace, gpus: List[int]) -> int:
+    requested = int(getattr(args, "video2smpl_workers", 0) or 0)
+    if requested <= 0:
+        requested = min(DEFAULT_GPU_WORKERS, len(gpus)) if len(gpus) > 1 else 1
+    return max(1, requested)
+
+
+def _args_dict_for_worker(args: argparse.Namespace) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for key, val in vars(args).items():
+        if isinstance(val, Path):
+            out[key] = str(val)
+        else:
+            out[key] = val
+    return out
+
+
+def _run_one_sample(
+    *,
+    sample_id: str,
+    row: Dict[str, Any],
+    backend: str,
+    video_path: Path,
+    smpl_npz_path: Path,
+    sample_train: Path,
+    text_prompt: str,
+    args: argparse.Namespace,
+    vendor_root: Path,
+    prompthmr_vendor: Any,
+    manifest_source: str,
+    manifest_link: str,
+    prev_manifest: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    if backend == HMR_BACKEND_CAMERAHMR:
+        run_camerahmr_sample(
+            video_path=video_path,
+            output_npz=smpl_npz_path,
+            args=args,
+            vendor_root=vendor_root,
+        )
+    else:
+        run_prompthmr_sample(
+            video_path=video_path,
+            output_npz=smpl_npz_path,
+            text_prompt=text_prompt,
+            args=args,
+            vendor_root=prompthmr_vendor,
+        )
+
+    extract_first_frame(video_path, sample_train / "first_frame.jpg")
+    paths = sample_paths(sample_id, video_path.name, hmr_backend=backend)
+    old = prev_manifest.get(sample_id, row)
+    link_val = old.get("link")
+    if link_val is None or str(link_val).strip() == "":
+        link_val = manifest_link
+    return build_video2smpl_row(
+        sample_id=sample_id,
+        original_video=str(row.get("original_video") or video_path.name),
+        video_rel=paths["video_path"],
+        first_frame_rel=paths["first_frame"],
+        smpl_rel=paths["smpl_path"],
+        smpl_backend=backend,
+        source=manifest_source,
+        link=str(link_val),
+        old_row=old,
+    )
+
+
+def _save_outputs(
+    *,
+    out_manifest: Path,
+    mapping_path: Path,
+    work_root: Path,
+    id_width: int,
+    prev_manifest: Dict[str, Dict[str, Any]],
+    id_mapping: List[Dict[str, str]],
+) -> None:
+    id_mapping.sort(key=lambda it: int(it["sample_id"]) if it.get("sample_id", "").isdigit() else 0)
+    for i, item in enumerate(id_mapping, start=1):
+        item["seq_index"] = str(i)
+
+    manifest_out = sorted(
+        prev_manifest.values(),
+        key=lambda r: int(r["sample_id"]) if str(r.get("sample_id", "")).isdigit() else 0,
+    )
+    save_manifest(out_manifest, manifest_out)
+
+    with open(mapping_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "root_dir": str(work_root),
+                "id_width": id_width,
+                "count": len(id_mapping),
+                "items": id_mapping,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 def run(args: argparse.Namespace) -> None:
     if args.id_width < 1:
         raise ValueError("--id_width must be >= 1")
@@ -66,6 +189,9 @@ def run(args: argparse.Namespace) -> None:
                 + "\n".join(missing)
                 + "\nRun: bash scripts/copy_prompthmr_vendor.sh"
             )
+        from pipeline.stages.video2smpl.prompthmr_env import verify_prompthmr_runtime
+
+        verify_prompthmr_runtime(vendor_root=vendor, ckpt_root=ckpt)
 
     work_root = Path(args.root_dir).resolve()
     manifest_link = resolve_manifest_link(args)
@@ -118,6 +244,19 @@ def run(args: argparse.Namespace) -> None:
     vendor_root = Path(args.vendor_root).resolve()
     prompthmr_vendor = getattr(args, "prompthmr_vendor", None)
 
+    gpus = _parse_video2smpl_gpus(getattr(args, "video2smpl_gpus", "auto"))
+    workers = _resolve_video2smpl_workers(args, gpus)
+    if workers > len(gpus):
+        print(
+            f"WARN: video2smpl workers={workers} > gpus={len(gpus)}; "
+            f"multiple workers may share a GPU and risk OOM.",
+            flush=True,
+        )
+    print(
+        f"video2smpl parallel: workers={workers}, gpus={gpus}",
+        flush=True,
+    )
+
     processed = 0
     skipped_done = 0
     skipped_no_caption = 0
@@ -128,8 +267,18 @@ def run(args: argparse.Namespace) -> None:
         key=lambda r: int(r["sample_id"]) if str(r.get("sample_id", "")).isdigit() else 0,
     )
 
-    for row in work_items:
+    pending_tasks: List[Dict[str, Any]] = []
+    args_dict = _args_dict_for_worker(args)
+
+    stage_progress_set_total(len(work_items))
+    for idx, row in enumerate(work_items, start=1):
         sample_id = str(row["sample_id"])
+        stage_progress_update(
+            done=idx - 1,
+            total=len(work_items),
+            item=sample_id,
+            note="video2smpl",
+        )
         video_rel = resolve_video_rel(row)
         if not video_rel:
             print(f"WARN: skip {sample_id}: missing video_path")
@@ -138,6 +287,7 @@ def run(args: argparse.Namespace) -> None:
 
         if smpl_filled_for_backend(row, backend) and not args.overwrite:
             skipped_done += 1
+            stage_progress_update(done=idx, note="skipped(already has smpl)")
             continue
 
         text_prompt = ""
@@ -165,17 +315,17 @@ def run(args: argparse.Namespace) -> None:
             continue
 
         rel = video_rel
+        mapping_item = None
         if rel not in path_to_sample:
-            id_mapping.append(
-                {
-                    "sample_id": sample_id,
-                    "seq_index": "",
-                    "original_filename": row.get("original_video") or video_path.name,
-                    "original_stem": video_path.stem,
-                    "original_path_relative": rel,
-                    "output_sample_dir": sample_id,
-                }
-            )
+            mapping_item = {
+                "sample_id": sample_id,
+                "seq_index": "",
+                "original_filename": row.get("original_video") or video_path.name,
+                "original_stem": video_path.stem,
+                "original_path_relative": rel,
+                "output_sample_dir": sample_id,
+            }
+            id_mapping.append(mapping_item)
             path_to_sample[rel] = sample_id
 
         sample_train = out_trainable / sample_id
@@ -183,68 +333,114 @@ def run(args: argparse.Namespace) -> None:
         smpl_name = smpl_filename_for_backend(backend)
         smpl_npz_path = sample_train / smpl_name
 
-        try:
-            if backend == HMR_BACKEND_CAMERAHMR:
-                run_camerahmr_sample(
-                    video_path=video_path,
-                    output_npz=smpl_npz_path,
-                    args=args,
-                    vendor_root=vendor_root,
-                )
-            else:
-                run_prompthmr_sample(
-                    video_path=video_path,
-                    output_npz=smpl_npz_path,
-                    text_prompt=text_prompt,
-                    args=args,
-                    vendor_root=prompthmr_vendor,
-                )
-        except Exception as e:
-            print(f"WARN: skip {sample_id}: {backend} failed: {e}")
-            errors += 1
-            continue
-
-        paths = sample_paths(sample_id, video_path.name, hmr_backend=backend)
-        extract_first_frame(video_path, sample_train / "first_frame.jpg")
-
         old = prev_manifest.get(sample_id, row)
         link_val = old.get("link")
         if link_val is None or str(link_val).strip() == "":
             link_val = manifest_link
-        prev_manifest[sample_id] = build_video2smpl_row(
-            sample_id=sample_id,
-            original_video=str(row.get("original_video") or video_path.name),
-            video_rel=paths["video_path"],
-            first_frame_rel=paths["first_frame"],
-            smpl_rel=paths["smpl_path"],
-            smpl_backend=backend,
-            source=manifest_source,
-            link=str(link_val),
-            old_row=old,
-        )
-        processed += 1
 
-    id_mapping.sort(key=lambda it: int(it["sample_id"]) if it.get("sample_id", "").isdigit() else 0)
-    for i, item in enumerate(id_mapping, start=1):
-        item["seq_index"] = str(i)
-
-    manifest_out = sorted(
-        prev_manifest.values(),
-        key=lambda r: int(r["sample_id"]) if str(r.get("sample_id", "")).isdigit() else 0,
-    )
-    save_manifest(out_manifest, manifest_out)
-
-    with open(mapping_path, "w", encoding="utf-8") as f:
-        json.dump(
+        pending_tasks.append(
             {
-                "root_dir": str(work_root),
-                "id_width": args.id_width,
-                "count": len(id_mapping),
-                "items": id_mapping,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
+                "idx": idx,
+                "sample_id": sample_id,
+                "backend": backend,
+                "work_root": str(work_root),
+                "video_path": str(video_path),
+                "smpl_npz_path": str(smpl_npz_path),
+                "text_prompt": text_prompt,
+                "args": args_dict,
+                "vendor_root": str(vendor_root),
+                "prompthmr_vendor": prompthmr_vendor,
+                "manifest_source": manifest_source,
+                "link": str(link_val),
+                "original_video": str(row.get("original_video") or video_path.name),
+                "old_row": dict(old),
+                "mapping_item": mapping_item,
+            }
+        )
+
+    if workers == 1:
+        for task in pending_tasks:
+            sample_id = task["sample_id"]
+            try:
+                updated = _run_one_sample(
+                    sample_id=sample_id,
+                    row=prev_manifest.get(sample_id, {}),
+                    backend=backend,
+                    video_path=Path(task["video_path"]),
+                    smpl_npz_path=Path(task["smpl_npz_path"]),
+                    sample_train=out_trainable / sample_id,
+                    text_prompt=str(task.get("text_prompt") or ""),
+                    args=args,
+                    vendor_root=vendor_root,
+                    prompthmr_vendor=prompthmr_vendor,
+                    manifest_source=manifest_source,
+                    manifest_link=manifest_link,
+                    prev_manifest=prev_manifest,
+                )
+            except Exception as e:
+                print(f"WARN: skip {sample_id}: {backend} failed: {e}")
+                errors += 1
+                stage_progress_update(done=task["idx"], note=f"error: {e}")
+                continue
+
+            prev_manifest[sample_id] = updated
+            processed += 1
+            stage_progress_update(done=task["idx"], item=sample_id, note="ok")
+            _save_outputs(
+                out_manifest=out_manifest,
+                mapping_path=mapping_path,
+                work_root=work_root,
+                id_width=args.id_width,
+                prev_manifest=prev_manifest,
+                id_mapping=id_mapping,
+            )
+    else:
+        mp_ctx = mp.get_context("spawn")
+        done_parallel = 0
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+            futures = []
+            for i, task in enumerate(pending_tasks):
+                task = dict(task)
+                task["gpu_id"] = gpus[i % len(gpus)]
+                futures.append(pool.submit(process_video2smpl_task, task))
+
+            for fut in as_completed(futures):
+                result = fut.result()
+                done_parallel += 1
+                sample_id = str(result.get("sample_id", "?"))
+                if result.get("status") == "ok":
+                    prev_manifest[sample_id] = result["row"]
+                    processed += 1
+                    note = "ok"
+                else:
+                    errors += 1
+                    err = result.get("error", "unknown error")
+                    print(f"WARN: skip {sample_id}: {backend} failed: {err}")
+                    note = f"error: {err}"
+
+                stage_progress_update(
+                    done=skipped_done + done_parallel,
+                    total=len(work_items),
+                    item=sample_id,
+                    note=note,
+                )
+                _save_outputs(
+                    out_manifest=out_manifest,
+                    mapping_path=mapping_path,
+                    work_root=work_root,
+                    id_width=args.id_width,
+                    prev_manifest=prev_manifest,
+                    id_mapping=id_mapping,
+                )
+
+    if not pending_tasks:
+        _save_outputs(
+            out_manifest=out_manifest,
+            mapping_path=mapping_path,
+            work_root=work_root,
+            id_width=args.id_width,
+            prev_manifest=prev_manifest,
+            id_mapping=id_mapping,
         )
 
     pending_after = rows_pending_smpl(load_manifest_list(out_manifest))
@@ -301,6 +497,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--id_width", type=int, default=6)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--device", type=str, default=None)
+    parser.add_argument(
+        "--video2smpl-workers",
+        type=int,
+        default=0,
+        help="Parallel sample workers (0=auto: 8 GPUs / 8 workers; 1=serial). Each worker uses one GPU.",
+    )
+    parser.add_argument(
+        "--video2smpl-gpus",
+        type=str,
+        default="auto",
+        help='GPU ids for workers, e.g. "0,1,2,3" or "auto" (all visible CUDA devices).',
+    )
     parser.add_argument("--max_frames", type=int, default=500)
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--person_idx", type=int, default=0)

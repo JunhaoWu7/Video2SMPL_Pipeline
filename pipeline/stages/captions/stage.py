@@ -4,6 +4,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from pipeline.llm_defaults import DEFAULT_CAPTIONS_MODEL, DEFAULT_LLM_BASE_URL
+from pipeline.parallel_defaults import DEFAULT_STAGE_WORKERS
 from pipeline.manifest import DEFAULT_MANIFEST_NAME, manifest_path
 from pipeline.stages.base import PipelineStage
 
@@ -26,7 +28,7 @@ class CaptionsStage(PipelineStage):
             default=None,
             help="Optional separate output; default is same file as --manifest.",
         )
-        group.add_argument("--model", type=str, default="openai/gpt-4o")
+        group.add_argument("--model", type=str, default=DEFAULT_CAPTIONS_MODEL)
         group.add_argument(
             "--vision-detail",
             type=str,
@@ -41,15 +43,42 @@ class CaptionsStage(PipelineStage):
             default="en",
         )
         group.add_argument("--sleep", type=float, default=0.5)
-        group.add_argument("--workers", type=int, default=4)
+        group.add_argument("--workers", type=int, default=DEFAULT_STAGE_WORKERS)
         group.add_argument("--force-recaption", action="store_true")
         group.add_argument("--dry-run", action="store_true")
         group.add_argument("--timeout", type=float, default=600.0)
         group.add_argument("--max-retries", type=int, default=2)
-        group.add_argument("--base-url", type=str, default="http://47.94.22.126/v1")
+        group.add_argument(
+            "--caption-parse-retries",
+            type=int,
+            default=2,
+            help="Re-call VLM when JSON validation fails (total tries = 1 + value).",
+        )
+        group.add_argument(
+            "--caption-temperature",
+            type=float,
+            default=0.0,
+            help="Caption API temperature (0 = deterministic).",
+        )
+        group.add_argument(
+            "--json-mode",
+            action="store_true",
+            help="Enable response_format=json_object (off by default for vision VLMs).",
+        )
+        group.add_argument(
+            "--no-json-mode",
+            action="store_true",
+            help="Force-disable JSON mode.",
+        )
+        group.add_argument("--base-url", type=str, default=DEFAULT_LLM_BASE_URL)
         group.add_argument("--http-referer", type=str, default="")
         group.add_argument("--x-title", type=str, default="video2smpl-manifest-captions")
         group.add_argument("--heartbeat-sec", type=float, default=15.0)
+        group.add_argument(
+            "--no-drop-invalid-skill-category",
+            action="store_true",
+            help="Keep samples when skill_category validation fails (default: drop row + sample dir).",
+        )
 
     def validate_args(self, args: argparse.Namespace) -> None:
         from pipeline.manifest import load_manifest_list, manifest_path, resolve_video_rel
@@ -120,6 +149,10 @@ class CaptionsStage(PipelineStage):
             str(args.timeout),
             "--max-retries",
             str(args.max_retries),
+            "--caption-parse-retries",
+            str(args.caption_parse_retries),
+            "--caption-temperature",
+            str(args.caption_temperature),
             "--base-url",
             args.base_url,
             "--http-referer",
@@ -133,6 +166,12 @@ class CaptionsStage(PipelineStage):
             argv.append("--dry-run")
         if args.force_recaption:
             argv.append("--force-recaption")
+        if getattr(args, "json_mode", False):
+            argv.append("--json-mode")
+        if getattr(args, "no_json_mode", False):
+            argv.append("--no-json-mode")
+        if getattr(args, "no_drop_invalid_skill_category", False):
+            argv.append("--no-drop-invalid-skill-category")
 
         old_argv = sys.argv
         try:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Literal, Optional, Sequence, Tuple
+import threading
 
 from pipeline.stages.select.filters.common import (
     SelectFilterConfig,
@@ -18,6 +19,7 @@ ViewHint = Literal["third_person", "first_person", "uncertain", "no_person"]
 
 _YOLO_MODEL = None
 _YOLO_MODEL_PATH: Optional[str] = None
+_YOLO_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -126,7 +128,8 @@ def run_step2_person_view(video_path: Path, cfg: SelectFilterConfig) -> SelectFi
     per_frame: List[_FramePersonStats] = []
     for frame in frames:
         h, w = frame.shape[:2]
-        results = model.predict(frame, conf=cfg.yolo_conf, verbose=False, classes=[0])
+        with _YOLO_LOCK:
+            results = model.predict(frame, conf=cfg.yolo_conf, verbose=False, classes=[0])
         per_frame.append(_stats_for_frame(results[0], w, h))
 
     visible_frames = sum(1 for s in per_frame if s.person_count >= 1)

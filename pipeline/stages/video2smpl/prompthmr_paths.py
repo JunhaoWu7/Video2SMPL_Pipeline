@@ -53,6 +53,10 @@ def ensure_vendor_data_tree(
     if neutral.is_file() and not neutral_dst.exists():
         neutral_dst.parent.mkdir(parents=True, exist_ok=True)
         _symlink_force(neutral_dst, neutral)
+    smpl_src = smpl_ckpt / "smpl"
+    smpl_dst = data / "body_models" / "smpl"
+    if smpl_src.is_dir() and not smpl_dst.exists():
+        _symlink_force(smpl_dst, smpl_src)
     return ckpt
 
 
