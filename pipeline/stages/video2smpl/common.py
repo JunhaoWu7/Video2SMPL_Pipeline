@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +19,36 @@ def extract_first_frame(video_path: Path, output_jpg: Path) -> None:
     if not ok:
         raise RuntimeError(f"Cannot read first frame from video: {video_path}")
     cv2.imwrite(str(output_jpg), frame)
+
+
+def ensure_sample_video(video_path: Path, target_video: Path) -> None:
+    """
+    Ensure the trainable sample directory contains the source video.
+
+    The normal select path already places each video under
+    processed_trainable_data/<sample_id>/. Pre-built manifests may still point
+    at video/*.mp4; video2smpl standardizes the manifest path after SMPL
+    extraction, so the target video must exist before saving that path.
+    """
+    src = Path(video_path).resolve()
+    dst = Path(target_video)
+    if dst.exists():
+        if dst.resolve() == src:
+            return
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)
+        return
+    except OSError:
+        pass
+    try:
+        rel_src = os.path.relpath(src, start=dst.parent.resolve())
+        os.symlink(rel_src, dst)
+        return
+    except OSError:
+        pass
+    shutil.copy2(src, dst)
 
 
 def parse_sample_id_numeric(sample_id: str) -> Optional[int]:

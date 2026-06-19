@@ -81,6 +81,21 @@ def evaluate_vlm_prefilter(norm: dict[str, Any]) -> SelectFilterResult:
     return SelectFilterResult(status="passed")
 
 
+def _is_vlm_content_blocked(exc: BaseException) -> bool:
+    """True when the provider refuses to score frames (e.g. Gemini PROHIBITED_CONTENT)."""
+    msg = str(exc).lower()
+    if "prohibited_content" in msg or "prompt_blocked" in msg:
+        return True
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        code = str(err.get("code", "")).lower()
+        text = str(err.get("message", "")).lower()
+        if code == "prompt_blocked" or "prohibited_content" in text:
+            return True
+    return False
+
+
 def call_vlm_prefilter(
     client: Any,
     *,
@@ -98,21 +113,26 @@ def call_vlm_prefilter(
             {"type": "image_url", "image_url": {"url": url, "detail": vision_detail}}
         )
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict video-quality gate for human action clips. "
-                    "Answer with JSON only."
-                ),
-            },
-            {"role": "user", "content": user_content},
-        ],
-        max_tokens=256,
-        temperature=0.0,
-    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict video-quality gate for human action clips. "
+                        "Answer with JSON only."
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=256,
+            temperature=0.0,
+        )
+    except Exception as exc:
+        if _is_vlm_content_blocked(exc):
+            raise ValueError("VLM content blocked (PROHIBITED_CONTENT)") from exc
+        raise
     text = resp.choices[0].message.content
     if not text:
         raise ValueError("Empty VLM response for select step3.")
@@ -135,14 +155,22 @@ def run_step3_vlm(
     if not data_urls:
         return SelectFilterResult(status="rejected")
 
-    norm = call_vlm_prefilter(
-        client,
-        model=cfg.vlm_model,
-        data_urls=data_urls,
-        vision_detail=cfg.vlm_vision_detail,
-        num_frames=len(data_urls),
-    )
-    return evaluate_vlm_prefilter(norm)
+    vlm_called = False
+    try:
+        vlm_called = True
+        norm = call_vlm_prefilter(
+            client,
+            model=cfg.vlm_model,
+            data_urls=data_urls,
+            vision_detail=cfg.vlm_vision_detail,
+            num_frames=len(data_urls),
+        )
+    except ValueError as exc:
+        if "content blocked" in str(exc).lower():
+            return SelectFilterResult(status="rejected", vlm_called=vlm_called)
+        raise
+    out = evaluate_vlm_prefilter(norm)
+    return SelectFilterResult(status=out.status, vlm_called=vlm_called)
 
 
 def create_select_vlm_client(cfg: SelectFilterConfig) -> Any:

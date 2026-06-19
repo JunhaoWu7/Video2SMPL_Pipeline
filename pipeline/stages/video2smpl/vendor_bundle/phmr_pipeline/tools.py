@@ -8,6 +8,7 @@ from collections import defaultdict
 from scipy.interpolate import make_interp_spline, interp1d
 
 from .image_folder import ImageFolder
+from phmr_pipeline.quiet import is_quiet
 
 
 def est_camera(image):
@@ -212,16 +213,19 @@ def detect_segment_track_sam(images, out_path, paths_dict, debug_masks, sam2_typ
             
             # Combine area and score with equal weight
             combined_score = 0.5 * normalized_areas + 0.5 * normalized_scores
-            print(f"Combined score: {combined_score}")
+            if not is_quiet():
+                print(f"Combined score: {combined_score}")
             best_idxs = [x for x in np.argsort(combined_score)[::-1] if combined_score[x] > score_thresh]
             
             if len(best_idxs) > 1:
                 largest_person_idx = np.argmax(bbox_height)
                 largest_person_height = bbox_height[largest_person_idx]
-                print(f'number of people before filtering (height < {height_thresh} max): {len(best_idxs)}')
+                if not is_quiet():
+                    print(f'number of people before filtering (height < {height_thresh} max): {len(best_idxs)}')
 
                 best_idxs = [x for x in best_idxs if bbox_height[x] > largest_person_height * height_thresh]
-                print(f'number of people after filtering (height < {height_thresh} max): {len(best_idxs)}')
+                if not is_quiet():
+                    print(f'number of people after filtering (height < {height_thresh} max): {len(best_idxs)}')
 
             # Get the details of the best person
             best_boxes = boxes[best_idxs]
@@ -229,11 +233,13 @@ def detect_segment_track_sam(images, out_path, paths_dict, debug_masks, sam2_typ
             best_keypoints = keypoints[best_idxs]
             best_combined_scores = combined_score[best_idxs]
             start_frame = i
-            print(f"Best person scores: {best_scores}")
-            print(f"Best person combined scores: {best_combined_scores}")
+            if not is_quiet():
+                print(f"Best person scores: {best_scores}")
+                print(f"Best person combined scores: {best_combined_scores}")
             break
         else:
-            print("No persons detected in the image.")
+            if not is_quiet():
+                print("No persons detected in the image.")
             continue
     
     if start_frame == -1:

@@ -83,6 +83,22 @@ class SelectStage(PipelineStage):
             default=DEFAULT_STAGE_WORKERS,
             help=f"Parallel filter workers per video (default: {DEFAULT_STAGE_WORKERS}). Use 1 for serial.",
         )
+        group.add_argument(
+            "--select-checkpoint",
+            type=str,
+            default=None,
+            help="Filter checkpoint path (default: <root_dir>/logs/select_filter_checkpoint.json).",
+        )
+        group.add_argument(
+            "--select-no-checkpoint",
+            action="store_true",
+            help="Disable filter checkpoint / resume.",
+        )
+        group.add_argument(
+            "--select-clear-checkpoint",
+            action="store_true",
+            help="Clear filter checkpoint before run.",
+        )
 
     def validate_args(self, args: argparse.Namespace) -> None:
         if not str(getattr(args, "source", "") or "").strip():

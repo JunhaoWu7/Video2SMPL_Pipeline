@@ -3,6 +3,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from prompt_hmr.utils.rotation_conversions import matrix_to_rotation_6d, rotation_6d_to_matrix
+from phmr_pipeline.quiet import log
     
 
 def gmof(x, sigma=100):
@@ -62,7 +63,7 @@ def post_optimization(cfg, results, images, smplx, opt_contact=True, loss_kp_w=0
         rcw[pidx, v['frames']] = pred_cam['Rcw'][v['frames']]
         tcw[pidx, v['frames']] = pred_cam['Tcw'][v['frames']]
 
-    print(f"Postprocessing the results")
+    log("PromptHMR: postprocessing")
     bbox_height = bboxes[:, :, 3] - bboxes[:, :, 1]
     bbox_height = torch.from_numpy(bbox_height).float().cuda()
     bbox_height = bbox_height.clamp(min=1e-6)

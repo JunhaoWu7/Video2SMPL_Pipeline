@@ -2,6 +2,7 @@ import os
 import torch
 from glob import glob
 from .core.config import parse_args
+from phmr_pipeline.quiet import log
 
 def load_model(ckpt):
     from .models import build_phmr
@@ -25,14 +26,14 @@ def load_model_from_cfg(cfg, metrics='avg_mpjpe', folder='lightning_logs'):
     ckpts = glob(f'{folder}/{exp}/checkpoints/*.ckpt')
     valid = [i for i, ckpt in enumerate(ckpts) if metrics in ckpt][0]
     weight = torch.load(ckpts[valid], map_location='cuda', weights_only=True)
-    print('Using checkpoint', ckpts[valid])
+    log(f'Using checkpoint {ckpts[valid]}')
 
     # Get the model
     model = build_phmr(cfg)
     model = model.cuda()
     m = model.load_state_dict(weight['state_dict'], strict=False)
     _ = model.eval()
-    print('Loaded ckpt:', m)
+    log(f'Loaded ckpt: {m}')
 
     return model
 

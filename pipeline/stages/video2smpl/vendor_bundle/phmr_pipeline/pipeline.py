@@ -19,6 +19,7 @@ from phmr_pipeline.world import world_hps_estimation
 from phmr_pipeline.postprocessing import post_optimization
 from phmr_pipeline.mcs_export_cam import export_scene_with_camera
 from smplcodec import SMPLCodec
+from phmr_pipeline.quiet import log, log_warn
 
 
 class Pipeline:
@@ -128,7 +129,7 @@ class Pipeline:
         opt_intr = False if self.cfg.use_depth else True
         keyframes = None
         if self.cfg.static_cam or static_cam:
-            print("Using static camera assumption")
+            log("Using static camera assumption")
             static_cam = True
             if self.cfg.calib is None:
                 cam_int = est_calib(self.images)
@@ -149,8 +150,8 @@ class Pipeline:
                             cam_int = calibrate_intrinsics(self.cfg.img_folder, masks)
                     except ValueError as e:
                         static_cam = True
-                        print(e)
-                        print("Warning: probably there is not much camera motion in the video!!")
+                        log_warn(str(e))
+                        log_warn("probably there is not much camera motion in the video; using static calib")
                         cam_int = est_calib(self.images)
 
                 elif self.cfg.focal is not None:
@@ -167,8 +168,7 @@ class Pipeline:
         if static_cam:
             cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
             cam_T = torch.zeros((len(masks), 3))
-            print("Warning: probably there is not much camera motion in the video!!")
-            print("Setting camera motion to zero")
+            log("Static camera: zero camera motion")
         else:
             try:
                 cam_R, cam_T, cam_int = run_metric_slam(
@@ -186,19 +186,17 @@ class Pipeline:
                 if str(e).startswith("not enough values to unpack"):
                     cam_R = torch.eye(3)[None].repeat_interleave(len(masks), 0)
                     cam_T = torch.zeros((len(masks), 3))
-                    print("Warning: probably there is not much camera motion in the video!!")
-                    print("Setting camera motion to zero")
+                    log_warn("SLAM failed; using zero camera motion")
                 else:
                     raise e
                     
-        print("Camera intrinsics:", cam_int)
+        log(f"Camera intrinsics: focal={cam_int[0]:.1f}")
         camera = {
-            'pred_cam_R': cam_R.numpy(), 
-            'pred_cam_T': cam_T.numpy(), 
-            'img_focal': cam_int[0], 
+            'pred_cam_R': cam_R.numpy(),
+            'pred_cam_T': cam_T.numpy(),
+            'img_focal': cam_int[0],
             'img_center': cam_int[2:]
         }
-        print("cam focal length: ", cam_int[0])
         self.results['camera'] = camera
         self.results['has_slam'] = True
         return
@@ -297,7 +295,7 @@ class Pipeline:
         self.smplx = self.smplx.cpu()
 
         if os.path.isfile(f'{seq_folder}/results.pkl'):
-            print('Loading available results...')
+            log('Loading cached PromptHMR results')
             self.results = joblib.load(f'{seq_folder}/results.pkl')
             return self.results
         
@@ -331,34 +329,34 @@ class Pipeline:
 
         ### detect_segment_track 
         if not self.results['has_tracks']:
-            print("Running detect, segment, and track pipeline...")
+            log("PromptHMR: detect / segment / track")
             self.run_detect_track()
 
         ### slam
         if not self.results['has_slam']:
-            print("Running camera motion estimation...")
+            log("PromptHMR: camera motion")
             self.camera_motion_estimation(static_cam)
 
         ### keypoints detection
         if not self.results['has_2d_kpts']:
-            print("Estimating 2D keypoints...")
+            log("PromptHMR: 2D keypoints")
             self.estimate_2d_keypoints()
         
         ### hps
         if not self.results['has_hps_cam']:
-            print("Running human mesh estimation...")
+            log("PromptHMR: mesh estimation")
             self.hps_estimation()
 
         ### convert hps to world coordinate
         if not self.results['has_hps_world']:
-            print("Running world coordinates estimation...")
+            log("PromptHMR: world coordinates")
             self.world_hps_estimation()
 
         cvt_to_numpy(self.results)
 
         # ### post optimization
         if self.cfg.run_post_opt and not self.results['has_post_opt']:
-            print("Running post optimization...")
+            log("PromptHMR: post optimization")
             self.post_optimization()
 
         if save_only_essential:
@@ -373,23 +371,23 @@ class Pipeline:
 
         if os.environ.get("VIDEO2SMPL_SKIP_MCS_EXPORT", "").strip() in ("1", "true", "yes"):
             return self.results
-        
+
         NUM_FRAMES = len(self.images)
         MCS_OUTPUT_PATH = f'{seq_folder}/world4d.mcs'
         smpl_paths = []
         per_body_frame_presence = []
-        for k,v in self.results['people'].items():
+        for k, v in self.results['people'].items():
             out_smpl_f = f'{os.path.abspath(self.cfg.seq_folder)}/subject-{k}.smpl'
-            
+
             SMPLCodec(
                 shape_parameters=v['smplx_world']['shape'].mean(0),
-                body_pose=v['smplx_world']['pose'][:, :22*3].reshape(-1,22,3), 
+                body_pose=v['smplx_world']['pose'][:, :22*3].reshape(-1, 22, 3),
                 body_translation=v['smplx_world']['trans'],
                 frame_count=v['frames'].shape[0], frame_rate=float(self.cfg.fps)
             ).write(out_smpl_f)
             smpl_paths.append(out_smpl_f)
-            per_body_frame_presence.append([int(v['frames'][0]), int(v['frames'][-1])+1])
-        
+            per_body_frame_presence.append([int(v['frames'][0]), int(v['frames'][-1]) + 1])
+
         export_scene_with_camera(
             smpl_buffers=[open(path, 'rb').read() for path in smpl_paths],
             frame_presences=per_body_frame_presence,
@@ -403,8 +401,5 @@ class Pipeline:
             smplx_path='data/body_models/smplx/SMPLX_neutral_array_f32_slim.npz',
         )
 
-        print("Usage:")
-        print(f'\tYou can drag and drop the "world4d.mcs" file to https://me.meshcapade.com/editor to view the result')
-        print(f'\tYou can import the "world4d.glb" file on Blender to view the result')
-        
+        log("Exported world4d.mcs")
         return self.results

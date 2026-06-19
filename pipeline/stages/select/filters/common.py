@@ -44,6 +44,7 @@ class SelectFilterConfig:
 @dataclass(frozen=True)
 class SelectFilterResult:
     status: SelectFilterOutcome
+    vlm_called: bool = False
 
 
 def combine_filter_status(

@@ -627,35 +627,90 @@ def caption_one_sample(
     use_json_mode = bool(getattr(args, "json_mode", False)) and not bool(
         getattr(args, "no_json_mode", False)
     )
-    try:
-        output: dict[str, Any] | None = None
+
+    def _call_with_retries(
+        *,
+        prompt: str,
+        required_fields: Sequence[str],
+        label_prefix: str = "",
+    ) -> dict[str, Any]:
         last_err: Exception | None = None
         for attempt in range(1 + parse_retries):
-            prompt = user_prompt
+            retry_prompt = prompt
             if attempt > 0 and last_err is not None:
-                prompt += build_caption_retry_suffix(attempt, missing_fields, last_err)
+                retry_prompt += build_caption_retry_suffix(attempt, required_fields, last_err)
             try:
-                output = call_with_heartbeat(
-                    lambda p=prompt: call_openai_caption_with_prompt(
+                return call_with_heartbeat(
+                    lambda p=retry_prompt: call_openai_caption_with_prompt(
                         client,
                         args.model,
                         p,
                         data_urls,
                         args.vision_detail,
-                        required_fields=missing_fields,
+                        required_fields=required_fields,
                         temperature=temperature,
                         use_json_mode=use_json_mode,
                     ),
-                    label=sid if attempt == 0 else f"{sid} (retry {attempt})",
+                    label=(
+                        f"{sid} {label_prefix}".strip()
+                        if attempt == 0
+                        else f"{sid} {label_prefix} (retry {attempt})".strip()
+                    ),
                     interval_sec=max(3.0, float(args.heartbeat_sec)),
                 )
-                break
             except Exception as exc:
                 last_err = exc
                 if attempt >= parse_retries:
                     raise
-        if output is None:
-            raise RuntimeError("caption API returned no output")
+        raise RuntimeError("caption API returned no output")
+
+    def _call_split_text_then_labels(primary_error: Exception) -> dict[str, Any]:
+        text_fields = tuple(
+            f for f in ("caption", "action_caption") if f in missing_fields
+        )
+        label_fields = tuple(
+            f for f in ("robot_learnable", "skill_category") if f in missing_fields
+        )
+        if not text_fields or not label_fields:
+            raise primary_error
+
+        text_prompt = build_user_prompt_manifest(
+            row,
+            len(data_urls),
+            args.caption_lang,
+            missing_fields=text_fields,
+        )
+        text_output = _call_with_retries(
+            prompt=text_prompt,
+            required_fields=text_fields,
+            label_prefix="text",
+        )
+
+        row_with_text = dict(row)
+        for key in text_fields:
+            if key in text_output:
+                row_with_text[key] = text_output[key]
+        label_prompt = build_user_prompt_manifest(
+            row_with_text,
+            len(data_urls),
+            args.caption_lang,
+            missing_fields=label_fields,
+        )
+        label_output = _call_with_retries(
+            prompt=label_prompt,
+            required_fields=label_fields,
+            label_prefix="labels",
+        )
+        return {**text_output, **label_output}
+
+    try:
+        try:
+            output = _call_with_retries(
+                prompt=user_prompt,
+                required_fields=missing_fields,
+            )
+        except Exception as primary_error:
+            output = _call_split_text_then_labels(primary_error)
         norm = normalize_caption_output(output)
         hints = existing_caption_hints(row)
         caption = norm["caption"] if "caption" in missing_fields else hints.get("caption", "")

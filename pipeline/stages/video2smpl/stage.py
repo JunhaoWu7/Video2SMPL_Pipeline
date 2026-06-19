@@ -79,6 +79,16 @@ class Video2SmplStage(PipelineStage):
             default="auto",
             help=f'GPU list for workers (default: auto = first {DEFAULT_GPU_WORKERS} CUDA devices).',
         )
+        group.add_argument(
+            "--prompthmr-verbose",
+            action="store_true",
+            help="Show full PromptHMR step logs (default: quiet vendor output).",
+        )
+        group.add_argument(
+            "--no-video2smpl-progress",
+            action="store_true",
+            help="Disable tqdm sample progress bar in the terminal.",
+        )
 
     def validate_args(self, args: argparse.Namespace) -> None:
         if not str(getattr(args, "source", "") or "").strip():

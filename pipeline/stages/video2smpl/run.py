@@ -35,6 +35,7 @@ from pipeline.stage_timing import stage_progress_set_total, stage_progress_updat
 from pipeline.stages.video2smpl.backends.camerahmr import run_camerahmr_sample
 from pipeline.stages.video2smpl.backends.prompthmr import run_prompthmr_sample
 from pipeline.stages.video2smpl.common import (
+    ensure_sample_video,
     extract_first_frame,
     load_id_mapping,
     max_sample_id_from_dirs,
@@ -43,6 +44,7 @@ from pipeline.stages.video2smpl.common import (
     resolve_manifest_link,
 )
 from pipeline.stages.video2smpl.mp_worker import process_video2smpl_task
+from pipeline.stages.video2smpl.progress import Video2SmplProgress
 
 
 def _list_available_gpus() -> List[int]:
@@ -111,8 +113,9 @@ def _run_one_sample(
             vendor_root=prompthmr_vendor,
         )
 
-    extract_first_frame(video_path, sample_train / "first_frame.jpg")
     paths = sample_paths(sample_id, video_path.name, hmr_backend=backend)
+    ensure_sample_video(video_path, sample_train / video_path.name)
+    extract_first_frame(video_path, sample_train / "first_frame.jpg")
     old = prev_manifest.get(sample_id, row)
     link_val = old.get("link")
     if link_val is None or str(link_val).strip() == "":
@@ -189,8 +192,12 @@ def run(args: argparse.Namespace) -> None:
                 + "\n".join(missing)
                 + "\nRun: bash scripts/copy_prompthmr_vendor.sh"
             )
-        from pipeline.stages.video2smpl.prompthmr_env import verify_prompthmr_runtime
+        from pipeline.stages.video2smpl.prompthmr_env import (
+            configure_prompthmr_output,
+            verify_prompthmr_runtime,
+        )
 
+        configure_prompthmr_output(verbose=bool(getattr(args, "prompthmr_verbose", False)))
         verify_prompthmr_runtime(vendor_root=vendor, ckpt_root=ckpt)
 
     work_root = Path(args.root_dir).resolve()
@@ -358,72 +365,39 @@ def run(args: argparse.Namespace) -> None:
             }
         )
 
-    if workers == 1:
-        for task in pending_tasks:
-            sample_id = task["sample_id"]
-            try:
-                updated = _run_one_sample(
-                    sample_id=sample_id,
-                    row=prev_manifest.get(sample_id, {}),
-                    backend=backend,
-                    video_path=Path(task["video_path"]),
-                    smpl_npz_path=Path(task["smpl_npz_path"]),
-                    sample_train=out_trainable / sample_id,
-                    text_prompt=str(task.get("text_prompt") or ""),
-                    args=args,
-                    vendor_root=vendor_root,
-                    prompthmr_vendor=prompthmr_vendor,
-                    manifest_source=manifest_source,
-                    manifest_link=manifest_link,
-                    prev_manifest=prev_manifest,
-                )
-            except Exception as e:
-                print(f"WARN: skip {sample_id}: {backend} failed: {e}")
-                errors += 1
-                stage_progress_update(done=task["idx"], note=f"error: {e}")
-                continue
-
-            prev_manifest[sample_id] = updated
-            processed += 1
-            stage_progress_update(done=task["idx"], item=sample_id, note="ok")
-            _save_outputs(
-                out_manifest=out_manifest,
-                mapping_path=mapping_path,
-                work_root=work_root,
-                id_width=args.id_width,
-                prev_manifest=prev_manifest,
-                id_mapping=id_mapping,
-            )
-    else:
-        mp_ctx = mp.get_context("spawn")
-        done_parallel = 0
-        with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
-            futures = []
-            for i, task in enumerate(pending_tasks):
-                task = dict(task)
-                task["gpu_id"] = gpus[i % len(gpus)]
-                futures.append(pool.submit(process_video2smpl_task, task))
-
-            for fut in as_completed(futures):
-                result = fut.result()
-                done_parallel += 1
-                sample_id = str(result.get("sample_id", "?"))
-                if result.get("status") == "ok":
-                    prev_manifest[sample_id] = result["row"]
-                    processed += 1
-                    note = "ok"
-                else:
+    show_progress = not bool(getattr(args, "no_video2smpl_progress", False))
+    progress = Video2SmplProgress(len(pending_tasks), enabled=show_progress)
+    try:
+        if workers == 1:
+            for task in pending_tasks:
+                sample_id = task["sample_id"]
+                try:
+                    updated = _run_one_sample(
+                        sample_id=sample_id,
+                        row=prev_manifest.get(sample_id, {}),
+                        backend=backend,
+                        video_path=Path(task["video_path"]),
+                        smpl_npz_path=Path(task["smpl_npz_path"]),
+                        sample_train=out_trainable / sample_id,
+                        text_prompt=str(task.get("text_prompt") or ""),
+                        args=args,
+                        vendor_root=vendor_root,
+                        prompthmr_vendor=prompthmr_vendor,
+                        manifest_source=manifest_source,
+                        manifest_link=manifest_link,
+                        prev_manifest=prev_manifest,
+                    )
+                except Exception as e:
+                    progress.write(f"WARN: skip {sample_id}: {backend} failed: {e}")
                     errors += 1
-                    err = result.get("error", "unknown error")
-                    print(f"WARN: skip {sample_id}: {backend} failed: {err}")
-                    note = f"error: {err}"
+                    stage_progress_update(done=task["idx"], note=f"error: {e}")
+                    progress.update(sample_id, f"error: {e}")
+                    continue
 
-                stage_progress_update(
-                    done=skipped_done + done_parallel,
-                    total=len(work_items),
-                    item=sample_id,
-                    note=note,
-                )
+                prev_manifest[sample_id] = updated
+                processed += 1
+                stage_progress_update(done=task["idx"], item=sample_id, note="ok")
+                progress.update(sample_id, "ok")
                 _save_outputs(
                     out_manifest=out_manifest,
                     mapping_path=mapping_path,
@@ -432,6 +406,47 @@ def run(args: argparse.Namespace) -> None:
                     prev_manifest=prev_manifest,
                     id_mapping=id_mapping,
                 )
+        else:
+            mp_ctx = mp.get_context("spawn")
+            done_parallel = 0
+            with ProcessPoolExecutor(max_workers=workers, mp_context=mp_ctx) as pool:
+                futures = []
+                for i, task in enumerate(pending_tasks):
+                    task = dict(task)
+                    task["gpu_id"] = gpus[i % len(gpus)]
+                    futures.append(pool.submit(process_video2smpl_task, task))
+
+                for fut in as_completed(futures):
+                    result = fut.result()
+                    done_parallel += 1
+                    sample_id = str(result.get("sample_id", "?"))
+                    if result.get("status") == "ok":
+                        prev_manifest[sample_id] = result["row"]
+                        processed += 1
+                        note = "ok"
+                    else:
+                        errors += 1
+                        err = result.get("error", "unknown error")
+                        progress.write(f"WARN: skip {sample_id}: {backend} failed: {err}")
+                        note = f"error: {err}"
+
+                    stage_progress_update(
+                        done=skipped_done + done_parallel,
+                        total=len(work_items),
+                        item=sample_id,
+                        note=note,
+                    )
+                    progress.update(sample_id, note)
+                    _save_outputs(
+                        out_manifest=out_manifest,
+                        mapping_path=mapping_path,
+                        work_root=work_root,
+                        id_width=args.id_width,
+                        prev_manifest=prev_manifest,
+                        id_mapping=id_mapping,
+                    )
+    finally:
+        progress.close()
 
     if not pending_tasks:
         _save_outputs(

@@ -80,8 +80,19 @@ def setup_prompthmr_runtime(
             sys.path.insert(0, gvhmr_str)
     os.chdir(root)
     os.environ["VIDEO2SMPL_SKIP_MCS_EXPORT"] = "1"
+    os.environ.setdefault("VIDEO2SMPL_PROMPTHMR_QUIET", "1")
     apply_absolute_path_patches(ckpt_root=ckpt_root, vendor_root=root)
     return root
+
+
+def configure_prompthmr_output(*, verbose: bool = False) -> None:
+    """Toggle PromptHMR vendor stdout and stage timing ticks for video2smpl runs."""
+    if verbose:
+        os.environ.pop("VIDEO2SMPL_PROMPTHMR_QUIET", None)
+        os.environ.pop("VIDEO2SMPL_SUPPRESS_STAGE_TICKS", None)
+    else:
+        os.environ["VIDEO2SMPL_PROMPTHMR_QUIET"] = "1"
+        os.environ["VIDEO2SMPL_SUPPRESS_STAGE_TICKS"] = "1"
 
 
 def apply_caption_text_patch(text_prompt: str, primary_track_id: Optional[int] = None) -> None:

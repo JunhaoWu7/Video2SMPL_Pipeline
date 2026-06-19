@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from contextvars import ContextVar
@@ -146,6 +147,12 @@ class StageProgressTicker:
     def _emit(self, message: str) -> None:
         if self._logger is not None:
             self._logger.info(message)
+        if os.environ.get("VIDEO2SMPL_SUPPRESS_STAGE_TICKS", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            return
         print(message, flush=True)
 
     def _loop(self) -> None:

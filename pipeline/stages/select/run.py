@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import shutil
+import signal
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -38,6 +39,13 @@ from pipeline.stages.select.filters.common import (
 from pipeline.parallel_defaults import DEFAULT_STAGE_WORKERS
 from pipeline.sample_renumber import renumber_sample_ids
 from pipeline.stage_timing import stage_progress_set_total, stage_progress_update
+from pipeline.stages.select.checkpoint import (
+    SelectCheckpointStore,
+    canonical_source_key,
+    clear_checkpoint_files,
+    load_checkpoint_with_vlm_called,
+    resolve_checkpoint_path,
+)
 from pipeline.stages.select.filters.pipeline import run_select_filters
 from pipeline.stages.select.filters.step3_vlm import create_select_vlm_client
 
@@ -51,6 +59,7 @@ class _SelectFilterOutcome:
     src_rel: str
     status: Literal["skipped", "rejected", "passed"]
     already_mapped: bool
+    vlm_called: bool = False
 
 
 def _video_src_rel(work_root: Path, video_path: Path) -> str:
@@ -79,6 +88,7 @@ def _filter_one_video(
             src_rel=src_rel,
             status="skipped",
             already_mapped=True,
+            vlm_called=False,
         )
 
     filter_result = run_select_filters(
@@ -97,6 +107,7 @@ def _filter_one_video(
         src_rel=src_rel,
         status=status,
         already_mapped=already_mapped,
+        vlm_called=bool(filter_result.vlm_called),
     )
 
 
@@ -138,6 +149,71 @@ def _max_id_from_mapping_and_manifest(
     return m
 
 
+def _manifest_source_keys(work_root: Path, row: Dict[str, Any]) -> List[str]:
+    """Stable source keys for preserving metadata across select re-numbering."""
+    keys: List[str] = []
+    for raw in (
+        row.get("original_video_path"),
+        row.get("video_path"),
+        row.get("rgb_path"),
+        row.get("original_video"),
+    ):
+        val = str(raw or "").strip().replace("\\", "/")
+        if not val:
+            continue
+        candidates = [val.lstrip("/")]
+        p = Path(val)
+        if p.is_absolute():
+            try:
+                candidates.append(str(p.resolve().relative_to(work_root)))
+            except ValueError:
+                pass
+        name = p.name
+        if name:
+            candidates.append(name)
+            candidates.append(f"video/{name}")
+        for cand in candidates:
+            norm = cand.strip().replace("\\", "/").lstrip("/")
+            if norm and norm not in keys:
+                keys.append(norm)
+    return keys
+
+
+def _build_previous_row_index(
+    work_root: Path,
+    prev_by_id: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for row in prev_by_id.values():
+        for key in _manifest_source_keys(work_root, row):
+            by_key.setdefault(key, row)
+    return by_key
+
+
+def _lookup_previous_row(
+    prev_by_id: Dict[str, Dict[str, Any]],
+    prev_by_source: Dict[str, Dict[str, Any]],
+    *,
+    sample_id: str,
+    src_rel: str,
+    video_path: Path,
+) -> Dict[str, Any]:
+    old = prev_by_id.get(sample_id)
+    if old:
+        return old
+    candidates = [
+        src_rel,
+        src_rel.replace("\\", "/").lstrip("/"),
+        video_path.name,
+        f"video/{video_path.name}",
+    ]
+    for key in candidates:
+        found = prev_by_source.get(key)
+        if found:
+            return found
+    return {}
+
+
 def _collect_videos(input_dir: Path) -> List[Path]:
     found: List[Path] = []
     for p in sorted(input_dir.rglob("*")):
@@ -164,6 +240,132 @@ def _build_filter_config(args: argparse.Namespace) -> SelectFilterConfig:
         vlm_http_referer=str(getattr(args, "select_vlm_http_referer", "") or ""),
         vlm_x_title=str(getattr(args, "select_vlm_x_title", "video2smpl-select-vlm")),
     )
+
+
+def _ordered_ingested_rows(manifest_rows: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        manifest_rows[sid]
+        for sid in sorted(manifest_rows.keys(), key=lambda s: int(s) if s.isdigit() else 0)
+        if sid.isdigit() and _row_is_ingested(manifest_rows[sid])
+    ]
+
+
+def _persist_select_progress(
+    *,
+    out_manifest: Path,
+    mapping_path: Path,
+    work_root: Path,
+    id_width: int,
+    manifest_rows: Dict[str, Dict[str, Any]],
+    id_mapping: List[Dict[str, str]],
+) -> None:
+    ordered = _ordered_ingested_rows(manifest_rows)
+    ingested_ids = {str(r.get("sample_id", "")).strip() for r in ordered if r.get("sample_id")}
+    filtered_mapping = [
+        it for it in id_mapping if str(it.get("sample_id", "")).strip() in ingested_ids
+    ]
+    save_manifest(out_manifest, ordered)
+    with open(mapping_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "root_dir": str(work_root),
+                "id_width": id_width,
+                "count": len(filtered_mapping),
+                "items": filtered_mapping,
+            },
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
+def _ingest_passed_outcome(
+    *,
+    outcome: _SelectFilterOutcome,
+    work_root: Path,
+    source: str,
+    link_default: str,
+    id_width: int,
+    use_symlink: bool,
+    overwrite: bool,
+    select_complete: bool,
+    path_to_sample: Dict[str, str],
+    id_mapping: List[Dict[str, str]],
+    manifest_rows: Dict[str, Dict[str, Any]],
+    prev_by_id: Dict[str, Dict[str, Any]],
+    prev_by_source: Dict[str, Dict[str, Any]],
+    next_id: int,
+) -> tuple[int, int]:
+    """Ingest one passed clip; return (next_id, added_delta)."""
+    video_path = outcome.video_path
+    src_rel = outcome.src_rel
+    already_mapped = outcome.already_mapped
+
+    if src_rel in path_to_sample:
+        dest_rel = sample_video_rel(path_to_sample[src_rel], video_path.name)
+        if (work_root / dest_rel).exists():
+            return next_id, 0
+
+    added = 0
+    if already_mapped and overwrite:
+        sid = path_to_sample[src_rel]
+        id_mapping[:] = [it for it in id_mapping if it.get("original_path_relative") != src_rel]
+    else:
+        sid = f"{next_id:0{id_width}d}"
+        next_id += 1
+        added = 1
+
+    dest_video = _ingest_video(
+        work_root=work_root,
+        sample_id=sid,
+        src_video=video_path,
+        use_symlink=use_symlink,
+        overwrite=overwrite,
+    )
+    try:
+        video_rel = str(dest_video.relative_to(work_root))
+    except ValueError:
+        video_rel = sample_video_rel(sid, dest_video.name)
+
+    id_mapping.append(
+        {
+            "sample_id": sid,
+            "seq_index": "",
+            "original_filename": video_path.name,
+            "original_stem": video_path.stem,
+            "original_path_relative": src_rel,
+            "output_sample_dir": sample_dir_rel(sid),
+        }
+    )
+    path_to_sample[src_rel] = sid
+
+    old = _lookup_previous_row(
+        prev_by_id,
+        prev_by_source,
+        sample_id=sid,
+        src_rel=src_rel,
+        video_path=video_path,
+    )
+    link_val = old.get("link")
+    if link_val is None or str(link_val).strip() == "":
+        link_val = link_default
+
+    base = new_row_template(
+        sample_id=sid,
+        original_video=dest_video.name,
+        source=source,
+        link=str(link_val),
+    )
+    updated = apply_select_update(
+        base,
+        video_path=video_rel,
+        select_status="passed",
+        select_notes="",
+        original_video_path=src_rel,
+        mark_complete=select_complete,
+    )
+    manifest_rows[sid] = merge_preserved_fields(updated, old)
+    return next_id, added
 
 
 def _ingest_video(
@@ -248,6 +450,7 @@ def run(args: argparse.Namespace) -> None:
             for r in try_load_legacy_manifest(work_root, args.manifest_name)
             if r.get("sample_id")
         }
+    prev_by_source = _build_previous_row_index(work_root, prev_by_id)
 
     next_id = _max_id_from_mapping_and_manifest(id_mapping, prev_by_id, args.id_width) + 1
     manifest_rows: Dict[str, Dict[str, Any]] = dict(prev_by_id)
@@ -259,6 +462,34 @@ def run(args: argparse.Namespace) -> None:
     if not videos:
         raise FileNotFoundError(f"No videos found under {input_dir} (recursive {VIDEO_SUFFIXES})")
 
+    select_complete = not skip_vlm
+    no_checkpoint = bool(getattr(args, "select_no_checkpoint", False))
+    checkpoint_path = resolve_checkpoint_path(
+        work_root, getattr(args, "select_checkpoint", None)
+    )
+    checkpoint_store: SelectCheckpointStore | None = None
+    if not no_checkpoint:
+        if bool(getattr(args, "select_clear_checkpoint", False)):
+            clear_checkpoint_files(checkpoint_path)
+        checkpoint_items, checkpoint_vlm_called = load_checkpoint_with_vlm_called(checkpoint_path)
+        checkpoint_store = SelectCheckpointStore(
+            checkpoint_path,
+            checkpoint_items,
+            checkpoint_vlm_called,
+        )
+        if len(checkpoint_store) > 0:
+            print(
+                f"Select checkpoint: {len(checkpoint_store)} prior filter result(s) "
+                f"at {checkpoint_path} (skipped on resume; no repeat VLM/YOLO)."
+            )
+            known_vlm = checkpoint_store.vlm_called_count()
+            known_meta = checkpoint_store.vlm_called_known_count()
+            if known_meta > 0:
+                print(
+                    f"Select checkpoint VLM calls recorded: {known_vlm} "
+                    f"(known for {known_meta} checkpoint result(s))."
+                )
+
     work_items: List[tuple[int, Path, str, bool]] = []
     for idx, video_path in enumerate(videos, start=1):
         src_rel = _video_src_rel(work_root, video_path)
@@ -266,9 +497,150 @@ def run(args: argparse.Namespace) -> None:
         work_items.append((idx, video_path, src_rel, already_mapped))
 
     stage_progress_set_total(len(work_items))
-    outcomes: List[_SelectFilterOutcome] = []
     progress_lock = threading.Lock()
     done_filters = 0
+    pending_items: List[tuple[int, Path, str, bool]] = []
+    shutdown_requested = threading.Event()
+
+    def _flush_select_state(*, reason: str) -> tuple[int, int]:
+        n_ckpt = len(checkpoint_store) if checkpoint_store is not None else 0
+        n_vlm = checkpoint_store.vlm_called_count() if checkpoint_store is not None else 0
+        n_vlm_known = (
+            checkpoint_store.vlm_called_known_count() if checkpoint_store is not None else 0
+        )
+        n_manifest = len(_ordered_ingested_rows(manifest_rows))
+        if checkpoint_store is not None:
+            checkpoint_store.compact()
+        _persist_select_progress(
+            out_manifest=out_manifest,
+            mapping_path=mapping_path,
+            work_root=work_root,
+            id_width=args.id_width,
+            manifest_rows=manifest_rows,
+            id_mapping=id_mapping,
+        )
+        print(
+            f"[select] Flushed ({reason}): checkpoint={n_ckpt} filter result(s), "
+            f"vlm_called={n_vlm} known={n_vlm_known}, "
+            f"manifest={n_manifest} ingested row(s)."
+        )
+        print(
+            "[select] Re-run the same select command to resume; "
+            "checkpointed videos skip VLM/YOLO."
+        )
+        return n_ckpt, n_manifest
+
+    def _request_shutdown(signum: int, _frame: Any) -> None:
+        if shutdown_requested.is_set():
+            return
+        print(f"\n[select] Signal {signum} received; will save after in-flight filters finish.")
+        shutdown_requested.set()
+
+    for _sig in (signal.SIGINT, signal.SIGTERM, signal.SIGUSR1):
+        signal.signal(_sig, _request_shutdown)
+
+    def _handle_outcome(
+        outcome: _SelectFilterOutcome,
+        *,
+        record_checkpoint: bool,
+    ) -> None:
+        nonlocal next_id, added, skipped, rejected
+        idx, video_path, src_rel, _ = (
+            outcome.idx,
+            outcome.video_path,
+            outcome.src_rel,
+            outcome.already_mapped,
+        )
+        checkpoint_key = canonical_source_key(work_root, video_path, src_rel)
+
+        if record_checkpoint and checkpoint_store is not None:
+            if outcome.status in ("passed", "rejected"):
+                checkpoint_store.set(
+                    checkpoint_key,
+                    outcome.status,
+                    vlm_called=outcome.vlm_called,
+                )
+
+        if outcome.status == "skipped":
+            skipped += 1
+            return
+        if outcome.status == "rejected":
+            rejected += 1
+            return
+
+        next_id, delta = _ingest_passed_outcome(
+                outcome=outcome,
+                work_root=work_root,
+                source=source,
+                link_default=link_default,
+                id_width=args.id_width,
+                use_symlink=use_symlink,
+                overwrite=bool(args.overwrite),
+                select_complete=select_complete,
+                path_to_sample=path_to_sample,
+                id_mapping=id_mapping,
+                manifest_rows=manifest_rows,
+                prev_by_id=prev_by_id,
+                prev_by_source=prev_by_source,
+                next_id=next_id,
+            )
+        added += delta
+        _persist_select_progress(
+            out_manifest=out_manifest,
+            mapping_path=mapping_path,
+            work_root=work_root,
+            id_width=args.id_width,
+            manifest_rows=manifest_rows,
+            id_mapping=id_mapping,
+        )
+
+    for item in work_items:
+        idx, video_path, src_rel, already_mapped = item
+        if already_mapped and not args.overwrite:
+            outcome = _SelectFilterOutcome(
+                idx=idx,
+                video_path=video_path,
+                src_rel=src_rel,
+                status="skipped",
+                already_mapped=True,
+                vlm_called=False,
+            )
+            with progress_lock:
+                done_filters += 1
+                _handle_outcome(outcome, record_checkpoint=False)
+                stage_progress_update(
+                    done=done_filters,
+                    total=len(work_items),
+                    item=video_path.name,
+                    note=outcome.status,
+                )
+            continue
+
+        checkpoint_key = canonical_source_key(work_root, video_path, src_rel)
+        cached = checkpoint_store.get(checkpoint_key) if checkpoint_store else None
+        if cached is not None and not args.overwrite:
+            outcome = _SelectFilterOutcome(
+                idx=idx,
+                video_path=video_path,
+                src_rel=src_rel,
+                status=cached,
+                already_mapped=already_mapped,
+                vlm_called=checkpoint_store.get_vlm_called(checkpoint_key)
+                if checkpoint_store
+                else False,
+            )
+            with progress_lock:
+                done_filters += 1
+                _handle_outcome(outcome, record_checkpoint=False)
+                stage_progress_update(
+                    done=done_filters,
+                    total=len(work_items),
+                    item=video_path.name,
+                    note=outcome.status,
+                )
+            continue
+
+        pending_items.append(item)
 
     def _run_filter(item: tuple[int, Path, str, bool]) -> _SelectFilterOutcome:
         idx, video_path, src_rel, already_mapped = item
@@ -284,110 +656,58 @@ def run(args: argparse.Namespace) -> None:
             vlm_client=vlm_client,
         )
 
-    if workers == 1:
-        for item in work_items:
-            idx, video_path, _, _ = item
-            stage_progress_update(
-                done=idx - 1,
-                total=len(work_items),
-                item=video_path.name,
-                note="selecting",
-            )
-            outcome = _run_filter(item)
-            outcomes.append(outcome)
-            stage_progress_update(done=idx, item=video_path.name, note=outcome.status)
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_map = {pool.submit(_run_filter, item): item for item in work_items}
-            for fut in as_completed(future_map):
-                item = future_map[fut]
+    if pending_items:
+        if workers == 1:
+            for item in pending_items:
                 idx, video_path, _, _ = item
-                outcome = fut.result()
                 with progress_lock:
-                    outcomes.append(outcome)
+                    stage_progress_update(
+                        done=done_filters,
+                        total=len(work_items),
+                        item=video_path.name,
+                        note="selecting",
+                    )
+                outcome = _run_filter(item)
+                with progress_lock:
                     done_filters += 1
+                    _handle_outcome(outcome, record_checkpoint=True)
                     stage_progress_update(
                         done=done_filters,
                         total=len(work_items),
                         item=video_path.name,
                         note=outcome.status,
                     )
-
-    outcomes.sort(key=lambda o: o.idx)
-    select_complete = not skip_vlm
-
-    for outcome in outcomes:
-        if outcome.status == "skipped":
-            skipped += 1
-            continue
-        if outcome.status == "rejected":
-            rejected += 1
-            continue
-
-        video_path = outcome.video_path
-        src_rel = outcome.src_rel
-        already_mapped = outcome.already_mapped
-
-        if already_mapped and args.overwrite:
-            sid = path_to_sample[src_rel]
-            id_mapping = [it for it in id_mapping if it.get("original_path_relative") != src_rel]
+                if shutdown_requested.is_set():
+                    break
         else:
-            sid = f"{next_id:0{args.id_width}d}"
-            next_id += 1
-            added += 1
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_map = {pool.submit(_run_filter, item): item for item in pending_items}
+                for fut in as_completed(future_map):
+                    item = future_map[fut]
+                    idx, video_path, _, _ = item
+                    outcome = fut.result()
+                    with progress_lock:
+                        done_filters += 1
+                        _handle_outcome(outcome, record_checkpoint=True)
+                        stage_progress_update(
+                            done=done_filters,
+                            total=len(work_items),
+                            item=video_path.name,
+                            note=outcome.status,
+                        )
+                    if shutdown_requested.is_set():
+                        break
 
-        dest_video = _ingest_video(
-            work_root=work_root,
-            sample_id=sid,
-            src_video=video_path,
-            use_symlink=use_symlink,
-            overwrite=args.overwrite,
-        )
-        try:
-            video_rel = str(dest_video.relative_to(work_root))
-        except ValueError:
-            video_rel = sample_video_rel(sid, dest_video.name)
+    if shutdown_requested.is_set():
+        with progress_lock:
+            _flush_select_state(reason="shutdown")
+        raise SystemExit(128 + signal.SIGINT)
 
-        id_mapping.append(
-            {
-                "sample_id": sid,
-                "seq_index": "",
-                "original_filename": video_path.name,
-                "original_stem": video_path.stem,
-                "original_path_relative": src_rel,
-                "output_sample_dir": sample_dir_rel(sid),
-            }
-        )
-        path_to_sample[src_rel] = sid
-
-        old = manifest_rows.get(sid, {})
-        link_val = old.get("link")
-        if link_val is None or str(link_val).strip() == "":
-            link_val = link_default
-
-        base = new_row_template(
-            sample_id=sid,
-            original_video=dest_video.name,
-            source=source,
-            link=str(link_val),
-        )
-        updated = apply_select_update(
-            base,
-            video_path=video_rel,
-            select_status="passed",
-            select_notes="",
-            original_video_path=src_rel,
-            mark_complete=select_complete,
-        )
-        manifest_rows[sid] = merge_preserved_fields(updated, old)
-
-    ordered = [
-        manifest_rows[sid]
-        for sid in sorted(manifest_rows.keys(), key=lambda s: int(s) if s.isdigit() else 0)
-        if sid.isdigit() and _row_is_ingested(manifest_rows[sid])
-    ]
+    ordered = _ordered_ingested_rows(manifest_rows)
     ingested_ids = {str(r.get("sample_id", "")).strip() for r in ordered if r.get("sample_id")}
-    id_mapping = [it for it in id_mapping if str(it.get("sample_id", "")).strip() in ingested_ids]
+    id_mapping[:] = [
+        it for it in id_mapping if str(it.get("sample_id", "")).strip() in ingested_ids
+    ]
 
     ordered, id_mapping, id_remap = renumber_sample_ids(
         work_root,
@@ -399,29 +719,40 @@ def run(args: argparse.Namespace) -> None:
     if changed:
         last_id = f"{len(ordered):0{args.id_width}d}" if ordered else "0"
         print(f"  Renumbered sample_id: {changed} dir(s) -> contiguous 000001..{last_id}")
+        for row in ordered:
+            sid = str(row.get("sample_id", "")).strip()
+            if sid:
+                manifest_rows[sid] = row
 
-    save_manifest(out_manifest, ordered)
+    _persist_select_progress(
+        out_manifest=out_manifest,
+        mapping_path=mapping_path,
+        work_root=work_root,
+        id_width=args.id_width,
+        manifest_rows=manifest_rows,
+        id_mapping=id_mapping,
+    )
 
-    with open(mapping_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "root_dir": str(work_root),
-                "id_width": args.id_width,
-                "count": len(id_mapping),
-                "items": id_mapping,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
+    if checkpoint_store is not None:
+        checkpoint_store.compact()
 
     mode = "symlink" if use_symlink else "move"
+    resumed = len(work_items) - len(pending_items)
     print(f"Select done. Scanned: {len(videos)} ({mode})")
+    if resumed > 0 and checkpoint_store is not None:
+        print(f"  Resumed from checkpoint: {resumed} video(s) (no re-filter).")
+    if checkpoint_store is not None:
+        print(
+            f"  VLM called: {checkpoint_store.vlm_called_count()} video(s) recorded "
+            f"(known for {checkpoint_store.vlm_called_known_count()} checkpoint result(s))."
+        )
     print(f"  Ingested: {added}, rejected: {rejected}, skipped (mapped): {skipped}")
     if not skip_vlm:
         print("  Select stage marked complete (stages_completed includes 'select').")
     print(f"  Manifest: {out_manifest}")
     print(f"  Mapping: {mapping_path}")
+    if checkpoint_store is not None:
+        print(f"  Checkpoint: {checkpoint_path}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -494,6 +825,22 @@ def build_parser() -> argparse.ArgumentParser:
             f"Parallel filter workers per video (default: {DEFAULT_STAGE_WORKERS}). "
             "Use 1 for strictly serial filters."
         ),
+    )
+    parser.add_argument(
+        "--select-checkpoint",
+        type=str,
+        default=None,
+        help="Filter checkpoint JSON path (default: <root_dir>/logs/select_filter_checkpoint.json).",
+    )
+    parser.add_argument(
+        "--select-no-checkpoint",
+        action="store_true",
+        help="Disable filter checkpoint (no resume; manifest still saved per passed clip).",
+    )
+    parser.add_argument(
+        "--select-clear-checkpoint",
+        action="store_true",
+        help="Delete existing filter checkpoint before run (without --overwrite).",
     )
     parser.add_argument("--source", type=str, required=True)
     parser.add_argument("--link", type=str, default=None)

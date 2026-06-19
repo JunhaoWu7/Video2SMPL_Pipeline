@@ -16,6 +16,7 @@ from phmr_pipeline.gvhmr.hmr4d.model.gvhmr.gvhmr_pl_demo import DemoPL
 from phmr_pipeline.gvhmr.hmr4d.utils.geo_transform import compute_cam_angvel
 from phmr_pipeline.gvhmr.hmr4d.utils.geo.hmr_cam import get_bbx_xys_from_xyxy, normalize_kp2d
 from prompt_hmr.utils.rotation_conversions import axis_angle_to_matrix
+from phmr_pipeline.quiet import log
 
 
 def load_video_head():
@@ -81,7 +82,7 @@ class PromptHMR_Video():
             tracks[k]['prhmr_img_feats'] = torch.stack(tracks[k]['prhmr_img_feats']).float()
 
         # Video model
-        print(f"Running PRHMR-Vid for tracks")
+        log("PromptHMR: video mesh head")
         for idx, k in enumerate(list(tracks.keys())):
             seqlen = tracks[k]['prhmr_img_feats'].shape[0]
             R_w2c = torch.eye(3).repeat(seqlen, 1, 1)
